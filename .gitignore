@@ -1,0 +1,25 @@
+# 本地依赖、缓存和开发工具文件。
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+.idea/
+.env
+
+# 私人聊天、附件、报告和构建产物。
+records/
+fronted/dist/
+
+#相关数据库隐私内容
+agent.db
+agent.db-journal
+agent.db-wal
+agent.db-shm
+
+# 其他本地环境配置，保留不含密钥的示例模板。
+.env.*
+!.env.example
+
+# 个人 OCR 测试图片与运行日志。
+ocr_test.png
+*.log

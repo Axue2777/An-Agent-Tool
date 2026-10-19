@@ -58,6 +58,8 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=50)
     conversation_id: UUID | None = None
+    # 默认保持原来的搜索能力，前端可以按请求关闭。
+    web_search: bool = True
 
 # 历史列表只返回会话信息，避免每次加载所有消息。
 @app.get("/chat/history", tags=["聊天历史"])
@@ -115,9 +117,11 @@ def process_chat(request: ChatRequest, on_event=None):
     history = get_recent_messages(conversation_id)
     try:
       # 接收最终回答和本轮执行步骤。
-            reply, tool_steps = run_agent(
-          client, history, conversation_id, on_event=on_event
-      )
+        reply, tool_steps = run_agent(
+            client, history, conversation_id,
+            on_event=on_event,
+            web_search=request.web_search,
+        )
     except Exception as error:
         # 将具体出错位置打印到后端终端，便于定位。
         traceback.print_exc()

@@ -8,6 +8,8 @@ import DOMPurify from 'dompurify'
 const input = ref('')
 const messages = ref([])
 const loading = ref(false)
+// 控制下一次发送是否允许联网搜索。
+const webSearchEnabled = ref(true)
 const error = ref('')
 const conversationId = ref(null)
 // 列表从后端读取，不再读取浏览器中的完整聊天内容。
@@ -261,6 +263,7 @@ async function send() {
       body: JSON.stringify({
         // 只提交本次问题；过去的对话由后端从数据库读取。
       messages: [{ role: 'user', content: text }],
+        web_search: webSearchEnabled.value,
         conversation_id: conversationId.value,
       }),
     })
@@ -506,6 +509,13 @@ onUnmounted(() => clearTimeout(copyTimer))
         <button type="button" @click="resumeFollowing">
           ↓ 回到最新
         </button>
+      </div>
+      <!-- 等待任务期间禁止切换，避免与当前请求的实际设置不一致。 -->
+      <div class="latest-bar">
+        <label>
+          <input v-model="webSearchEnabled" type="checkbox" :disabled="loading" />
+          联网搜索
+        </label>
       </div>
       <!-- 选择文件后自动上传；点击发送时，Agent 才开始分析。 -->
       <form class="composer" @submit.prevent="send">

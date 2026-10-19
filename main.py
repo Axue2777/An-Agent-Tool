@@ -24,6 +24,10 @@ from database import (
     save_assistant_message,
     list_conversations,
     get_conversation,
+    create_conversation,
+    rename_conversation,
+    delete_conversation,
+    get_recent_messages,
 )
 
 app = FastAPI()
@@ -69,6 +73,34 @@ def history_detail(conversation_id: UUID):
         raise HTTPException(status_code=404, detail="聊天记录不存在")
     return result
 
+# 限制重命名请求的标题长度。
+class RenameChatRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
+
+
+# 新建会话，编号由后端生成，直接返回空会话详情。
+@app.post("/chat/history", tags=["聊天历史"], status_code=201)
+def create_chat():
+    return create_conversation(uuid4())
+
+
+# 更新指定会话的标题。
+@app.patch("/chat/history/{conversation_id}", tags=["聊天历史"])
+def rename_chat(conversation_id: UUID, request: RenameChatRequest):
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="标题不能为空")
+    if not rename_conversation(conversation_id, title):
+        raise HTTPException(status_code=404, detail="聊天记录不存在")
+    return {"id": str(conversation_id), "title": title}
+
+
+# 删除数据库中的会话和消息，保留磁盘上的 Markdown 文件。
+@app.delete("/chat/history/{conversation_id}", tags=["聊天历史"])
+def delete_chat(conversation_id: UUID):
+    if not delete_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="聊天记录不存在")
+    return {"deleted": True, "id": str(conversation_id)}
 
 # 普通 HTTP 请求不传回调；事件流接口通过它接收进度。
 # 统一处理聊天、工具调用和 Markdown 记录，供两个接口复用。
@@ -79,7 +111,8 @@ def process_chat(request: ChatRequest, on_event=None):
     # 只追加本轮最新消息，不将浏览器提交的整段历史重复写库。
     save_user_message(conversation_id, request.messages[-1].content)
     append_record(conversation_id, "用户", request.messages[-1].content)
-    history = [message.model_dump() for message in request.messages]
+    # 最新用户消息在上方已经入库，这里读取时自然包含本次问题。
+    history = get_recent_messages(conversation_id)
     try:
       # 接收最终回答和本轮执行步骤。
             reply, tool_steps = run_agent(

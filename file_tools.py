@@ -29,7 +29,7 @@ def read_attachment(file_id, conversation_id, offset=0):
     if not isinstance(file_id, str):
         raise ValueError("附件编号必须是字符串")
     if type(offset) is not int or offset < 0:
-        raise ValueError("offset 必须是非负整数")
+        raise ValueError("offset 必须是非负整数s")
 
     attachment_id = UUID(file_id)
     path = (

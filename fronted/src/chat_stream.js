@@ -4,7 +4,7 @@ export async function readChatStream(response, onEvent) {
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-
+  
   // 忽略空行和心跳，只处理后端发送的数据事件。
   function handleLine(line) {
     if (line.startsWith('data:')) {

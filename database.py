@@ -1,4 +1,3 @@
-
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -56,12 +55,25 @@ def init_db():
 def save_user_message(conversation_id, content):
     chat_id = str(conversation_id)
     timestamp = now()
+    # 用首次提问的前 30 个字符命名，将换行和连续空白合并为一个空格。
+    title = " ".join(content.split())[:30] or "新建聊天"
     with connect_db() as db:
         db.execute("""
             INSERT INTO conversations(id, title, created_at, updated_at)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
-        """, (chat_id, content[:30] or "新建聊天", timestamp, timestamp))
+            ON CONFLICT(id) DO UPDATE SET
+                title = CASE
+                    WHEN conversations.title = '新建聊天'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM messages
+                        WHERE conversation_id = excluded.id AND role = 'user'
+                    )
+                    THEN excluded.title
+                    ELSE conversations.title
+                END,
+                updated_at = excluded.updated_at
+        """, (chat_id, title, timestamp, timestamp))
+        # 在同一事务中完成命名和消息保存；后续消息不再触发自动命名。
         db.execute("""
             INSERT INTO messages(conversation_id, role, content, created_at)
             VALUES (?, 'user', ?, ?)
@@ -119,7 +131,61 @@ def get_conversation(conversation_id):
 # - PRIMARY KEY 唯一标识会话或消息。
 # - FOREIGN KEY 将消息关联到会话。
 # - SQL 参数使用 ? 占位，用户文本不拼接到 SQL 中。
-# - ON CONFLICT 更新已有会话的时间，不覆盖会话标题。
+# - ON CONFLICT 仅在首次提问时替换默认标题，保留手动设置的非默认名称。
 # - 每条用户消息与对应会话创建在一个事务中保存。
 # - 不在等待模型时保持数据库事务，避免长时间占锁。
 # - 工具步骤使用 JSON 保留原始结构，恢复后仍能用于执行记录和下载链接。
+
+# 创建空会话，让“新建聊天”无需等到发送消息才保存。
+def create_conversation(conversation_id):
+    timestamp = now()
+    with connect_db() as db:
+        db.execute("""
+            INSERT INTO conversations(id, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (str(conversation_id), "新建聊天", timestamp, timestamp))
+    return get_conversation(conversation_id)
+
+
+# 修改标题，返回是否找到并更新了对应会话。
+def rename_conversation(conversation_id, title):
+    with connect_db() as db:
+        cursor = db.execute("""
+            UPDATE conversations SET title = ?, updated_at = ?
+            WHERE id = ?
+        """, (title, now(), str(conversation_id)))
+        return cursor.rowcount > 0
+
+
+# 在同一事务中先删除消息，再删除会话，满足外键约束。
+def delete_conversation(conversation_id):
+    with connect_db() as db:
+        db.execute(
+            "DELETE FROM messages WHERE conversation_id = ?",
+            (str(conversation_id),),
+        )
+        cursor = db.execute(
+            "DELETE FROM conversations WHERE id = ?",
+            (str(conversation_id),),
+        )
+        return cursor.rowcount > 0
+
+# 只读取最近 21 条消息，不删除数据库中的完整历史。
+def get_recent_messages(conversation_id):
+    with connect_db() as db:
+        rows = db.execute("""
+            SELECT role, content
+            FROM messages
+            WHERE conversation_id = ?
+            ORDER BY id DESC
+            LIMIT 21
+        """, (str(conversation_id),)).fetchall()
+
+    # 查询时最新在前，交给模型前恢复为正常聊天顺序。
+    history = [dict(row) for row in reversed(rows)]
+
+    # 截取后如果从助手回答开始，移除这条缺少问题的回答。
+    while history and history[0]["role"] == "assistant":
+        history.pop(0)
+
+    return history

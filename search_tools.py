@@ -68,3 +68,14 @@ def search_web(query):
         return {"error": "智谱搜索连接失败或超时"}
     except ValueError:
         return {"error": "智谱搜索响应无法解析"}
+
+# 功能解释：
+
+# - SEARCH_TOOL 定义模型能看到的名称和参数。
+# - search_web 真正访问搜索接口，密钥从后端环境读取。
+# - search_engine 选择智谱搜索服务的引擎，本示例为 search_pro。
+# - count=5 控制返回条数；content_size 控制摘要长度。
+# - noLimit 表示不强制只查最近一周等时间段，不代表结果全部是最新。
+# - 统一转换为 sources 后，上层模型不需要理解不同供应商的原始字段。
+# - 没有结果时 sources 可以为空；模型应如实说明，不能编造。
+# - 网络或服务错误以 error 返回，沿用现有工具错误展示。

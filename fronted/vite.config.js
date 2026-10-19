@@ -1,3 +1,4 @@
+//配置开发服务器，将聊天请求转发给 FastAPI
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 

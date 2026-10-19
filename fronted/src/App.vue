@@ -1,38 +1,35 @@
-<!-- 我们将把默认页面改成聊天页面 -->
 <script setup>
 import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import { marked } from 'marked'
 import { readChatStream } from './chat_stream'
 import DOMPurify from 'dompurify'
 
-// 将消息中的 Markdown 转为经过清理的 HTML。
-function renderMarkdown(content) {
-  return DOMPurify.sanitize(marked.parse(content || '', { async: false }))
-}
-const input = ref('')       // 输入框内容
-const messages = ref([])    // 页面上显示的消息
-const loading = ref(false) // 是否正在等待回答
-const error = ref('')       // 请求失败时的提示
+const input = ref('')
+const messages = ref([])
+const loading = ref(false)
+const error = ref('')
 const conversationId = ref(null)
-const savedChats = ref(readSavedChats())
+// 列表从后端读取，不再读取浏览器中的完整聊天内容。
+const savedChats = ref([])
 const sidebarOpen = ref(true)
 const menuChatId = ref(null)
-// 显示当前任务阶段，上传时未设置则沿用默认等待提示。
 const progress = ref('')
-// 仅用于展示本轮正在生成的文字，不混入正式聊天历史。
 const streamingText = ref('')
-// 保存消息区域元素，以及是否自动跟随最新内容。
 const messageList = ref(null)
 const followLatest = ref(true)
-// 根据当前会话编号读取标题；未选择聊天时显示默认名称。
+
+// 标题跟随当前选中的会话。
 const currentChatTitle = computed(() => {
-  const chat = savedChats.value.find(
-    item => item.id === conversationId.value
-  )
+  const chat = savedChats.value.find(item => item.id === conversationId.value)
   return chat?.title || 'Agent 聊天'
 })
 
-// 用户距离底部不足 80 像素时，继续自动跟随。
+// Markdown 转换后再清理 HTML，避免直接插入不可信内容。
+function renderMarkdown(content) {
+  return DOMPurify.sanitize(marked.parse(content || '', { async: false }))
+}
+
+// 用户向上查看历史时暂停自动滚动。
 function handleMessageScroll() {
   const element = messageList.value
   if (!element) return
@@ -40,22 +37,18 @@ function handleMessageScroll() {
   followLatest.value = distance < 80
 }
 
-// 等待 Vue 更新页面尺寸后，再滚动到底部。
 async function scrollToLatest() {
   await nextTick()
   const element = messageList.value
   if (element) element.scrollTop = element.scrollHeight
 }
 
-// 用户主动点击按钮时，恢复自动跟随。
 function resumeFollowing() {
   followLatest.value = true
   scrollToLatest()
 }
 
-// 消息、执行进度或等待状态变化时，按用户当前选择滚动。
 watch(
-    // 文字逐步增长时，也按用户选择跟随最新内容。
   [messages, progress, loading, streamingText],
   () => {
     if (followLatest.value) scrollToLatest()
@@ -67,212 +60,21 @@ function toggleChatMenu(id) {
   menuChatId.value = menuChatId.value === id ? null : id
 }
 
-function persistChats() {
-  try {
-    localStorage.setItem('agent-chats', JSON.stringify(savedChats.value))
-  } catch {
-    error.value = '历史记录保存失败。'
+// 历史接口统一检查 HTTP 状态，并解析 FastAPI 返回的错误详情。
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, options)
+  const data = await response.json().catch(() => null)
+  if (!response.ok) {
+    const detail = typeof data?.detail === 'string'
+      ? data.detail
+      : JSON.stringify(data?.detail || data || '服务器未返回 JSON 详情')
+    throw new Error(`请求失败：${response.status}，${detail}`)
   }
+  if (data === null) throw new Error('接口未返回 JSON，请检查后端和 Vite 代理')
+  return data
 }
 
-function renameChat(chat) {
-  menuChatId.value = null
-  const title = window.prompt('输入新的聊天名称', chat.title)
-  if (title === null || !title.trim()) return
-  chat.title = title.trim().slice(0, 60)
-  persistChats()
-}
-
-function deleteChat(chat) {
-  menuChatId.value = null
-  if (!window.confirm(`删除聊天“${chat.title}”？Markdown 文件仍保留。`)) return
-  savedChats.value = savedChats.value.filter(item => item.id !== chat.id)
-  if (conversationId.value === chat.id) {
-    conversationId.value = null
-    messages.value = []
-    input.value = ''
-    error.value = ''
-  }
-  persistChats()
-  rememberSelectedChat()
-}
-
-function readSavedChats() {
-  try {
-    return JSON.parse(localStorage.getItem('agent-chats') || '[]')
-  } catch {
-    return []
-  }
-}
-
-function saveCurrentChat() {
-  // 新聊天即使没有消息，也要保留在历史列表中。
-  if (!conversationId.value) return 
-  if (!conversationId.value || messages.value.length === 0) return
-  const existing = savedChats.value.find(item => item.id === conversationId.value)
-  const chat = {
-    id: conversationId.value,
-    // 保留已设置的名称，空会话使用默认标题。
-    title: existing?.title ?? (messages.value[0]?.content.slice(0, 20) || '新建聊天'),
-    messages: messages.value.map(message => ({ ...message })),
-  }
-  const others = savedChats.value.filter(item => item.id !== chat.id)
-  savedChats.value = [chat, ...others]
-
-  try {
-    localStorage.setItem('agent-chats', JSON.stringify(savedChats.value))
-  } catch {
-    error.value = '浏览器历史保存失败，后端 Markdown 记录仍保留。'
-  }
-}
-
-// 打开历史聊天，并将选中的会话置顶、保存排序。
-function openChat(chat) {
-  if (loading.value) return
-  // 切换会话后，默认定位到这段聊天的最新消息。
-  followLatest.value = true
-  // 切换聊天时移除未完成的临时内容。
-  streamingText.value = ''
-  // 切换前保存当前聊天。
-  saveCurrentChat()
-
-  // 按编号找到最新记录，避免使用保存前的旧对象。
-  const selected = savedChats.value.find(item => item.id === chat.id)
-  if (!selected) return
-
-  // 恢复会话编号和消息，继续写入原来的 Markdown 文件。
-  conversationId.value = selected.id
-  messages.value = selected.messages.map(message => ({ ...message }))
-  input.value = ''
-  error.value = ''
-  menuChatId.value = null
-
-  // 将选中的聊天放在最前面，其余聊天保持原有顺序。
-  savedChats.value = [
-    selected,
-    ...savedChats.value.filter(item => item.id !== selected.id),
-  ]
-
-  // 保存列表顺序和选中状态，刷新后仍然有效。
-  persistChats()
-  rememberSelectedChat()
-}
-async function send() {
-  const text = input.value.trim()
-  if (!text || loading.value) return
-
-  // 首次发送时先建立会话。
-  if (!conversationId.value) newChat()
-
-  // 新请求清空上一轮临时文字，并恢复自动滚动。
-  streamingText.value = ''
-  followLatest.value = true
-
-  // 从这里开始，保留你原来的发送逻辑。
-  messages.value.push({ role: 'user', content: text })
-  saveCurrentChat()
-  input.value = ''
-  loading.value = true
-  progress.value = '正在连接 Agent…'
-  error.value = ''
-
-  // 后面的 try、fetch 等代码保持原样。
-
-  try {
-    const response = await fetch('/chat/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        // 展示用的执行步骤不重复发送给模型。
-        messages: messages.value.map(({ role, content }) => ({ role, content })),
-        conversation_id: conversationId.value,
-      }),
-    })
-    if (!response.ok) {
-      const detail = await response.text()
-      throw new Error(`请求失败：${response.status}，详情：${detail}`)
-  }
-    // 分别处理进度、最终结果和错误，不能再用 response.json()。
-    let completed = false
-    const toolNames = {
-      get_stock: '查询库存',
-      read_attachment: '读取附件',
-      save_report: '生成报告',
-      // 联网搜索继续使用现有的工具开始、结束事件。
-      search_web: '联网搜索',
-    }
-    await readChatStream(response, event => {
-      const name = toolNames[event.name] || event.name
-            // 每轮模型请求开始时，清空上一轮的临时说明。
-      if (event.type === 'round_start') {
-        streamingText.value = ''
-        progress.value = '正在生成…'
-      }
-
-      // 收到文字片段后，追加到页面上的临时回答。
-      if (event.type === 'text_delta') {
-        streamingText.value += event.text
-        progress.value = '正在生成…'
-      }
-
-      // 开始执行工具时，清除中间说明，继续显示工具进度。
-      if (event.type === 'tool_start') {
-        streamingText.value = ''
-      }
-      if (event.type === 'start') progress.value = '正在理解任务…'
-      if (event.type === 'tool_start') progress.value = `正在${name}…`
-      if (event.type === 'tool_end') {
-        progress.value = event.result?.error
-          ? `${name}未成功，正在处理…`
-          : `${name}完成，正在处理下一步…`
-      }
-      if (event.type === 'error') throw new Error(event.message)
-      if (event.type === 'done') {
-        // 最终结果继续使用原来的结构，保存历史和执行记录。
-        const data = event.data
-        conversationId.value = data.conversation_id
-        messages.value.push({
-          role: 'assistant',
-          content: data.reply,
-          tool_steps: data.tool_steps || [],
-        })
-
-        // 完整回答已经显示，清除临时副本，防止出现两份。
-        streamingText.value = ''
-
-        saveCurrentChat()
-        rememberSelectedChat()
-        completed = true
-      }
-    })
-    if (!completed) throw new Error('连接提前结束，未收到最终结果')
-  } catch (err) {
-    error.value = err.message
-  } finally {
-    progress.value=''
-    loading.value = false // 成功或失败都恢复发送按钮
-  }
-  rememberSelectedChat()
-}
-
-// 创建独立会话，并立即保存到左侧历史列表。
-function newChat() {
-  if (loading.value) return
-  // 切换会话后，默认定位到这段聊天的最新消息。
-  followLatest.value = true
-  // 切换聊天时移除未完成的临时内容。
-  streamingText.value = ''
-  saveCurrentChat()
-  conversationId.value = crypto.randomUUID()
-  messages.value = []
-  input.value = ''
-  error.value = ''
-  menuChatId.value = null
-  saveCurrentChat()
-  rememberSelectedChat()
-}
-
-// 保存当前选中的会话编号，供刷新页面后恢复。
+// 浏览器只保留选中的编号，不再写入完整消息。
 function rememberSelectedChat() {
   try {
     if (conversationId.value) {
@@ -281,53 +83,285 @@ function rememberSelectedChat() {
       localStorage.removeItem('agent-selected-chat')
     }
   } catch {
-    error.value = '当前聊天的选择状态保存失败。'
+    error.value = '无法记住选中状态；数据库中的聊天不受影响。'
   }
 }
 
-// 页面加载后，从已有历史中恢复上次选中的聊天。
-onMounted(() => {
-  try {
-    const id = localStorage.getItem('agent-selected-chat')
-    const chat = savedChats.value.find(item => item.id === id)
-    if (!chat) {
-      localStorage.removeItem('agent-selected-chat')
-      return
-    }
-    conversationId.value = chat.id
-    messages.value = chat.messages.map(message => ({ ...message }))
-  } catch {
-    error.value = '恢复上次聊天失败。'
-  }
-})
+// 当前选中的聊天始终放在列表最前面，其余保持后端顺序。
+function putSelectedFirst() {
+  const selected = savedChats.value.find(item => item.id === conversationId.value)
+  if (!selected) return
+  savedChats.value = [
+    selected,
+    ...savedChats.value.filter(item => item.id !== selected.id),
+  ]
+}
 
-// 上传文本资料，并把附件编号填入输入框，供 Agent 读取。
-async function uploadAttachment(event) {
-  const file = event.target.files?.[0]
-  if (!file || loading.value) return
+// 列表接口只取标题和编号；完整消息等点击时再加载。
+async function loadHistory() {
+  const data = await requestJson('/chat/history')
+  savedChats.value = data.conversations
+  putSelectedFirst()
+}
 
-  // 没有当前会话时，先创建，确保附件归属正确。
-  if (!conversationId.value) newChat()
-  const chatId = conversationId.value
+// 把后端返回的会话详情应用到聊天区域。
+function applyChat(chat) {
+  conversationId.value = chat.id
+  messages.value = chat.messages.map(message => ({ ...message }))
+  input.value = ''
+  streamingText.value = ''
+  followLatest.value = true
+  menuChatId.value = null
+  error.value = ''
+  putSelectedFirst()
+  rememberSelectedChat()
+}
+
+// 创建成功后才切换页面，失败时保留当前聊天。
+async function newChat() {
+  if (loading.value) return false
   loading.value = true
+  error.value = ''
+  progress.value = '正在新建聊天…'
+  try {
+    const chat = await requestJson('/chat/history', { method: 'POST' })
+    const { messages: unusedMessages, ...metadata } = chat
+    savedChats.value = [metadata, ...savedChats.value]
+    applyChat(chat)
+    return true
+  } catch (err) {
+    error.value = err.message
+    return false
+  } finally {
+    progress.value = ''
+    loading.value = false
+  }
+}
+
+// 点击历史时请求详情，不再从 localStorage 恢复消息。
+async function openChat(chat) {
+  if (loading.value) return
+  loading.value = true
+  error.value = ''
+  progress.value = '正在读取聊天…'
+  try {
+    const detail = await requestJson(`/chat/history/${encodeURIComponent(chat.id)}`)
+    applyChat(detail)
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    progress.value = ''
+    loading.value = false
+  }
+}
+
+// PATCH 成功后再更新本地标题，避免页面改名但数据库没有改。
+async function renameChat(chat) {
+  if (loading.value) return
+  menuChatId.value = null
+  const title = window.prompt('输入新的聊天名称', chat.title)
+  if (title === null || !title.trim()) return
+  loading.value = true
+  error.value = ''
+  try {
+    const result = await requestJson(`/chat/history/${encodeURIComponent(chat.id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title.trim().slice(0, 60) }),
+    })
+    chat.title = result.title
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    loading.value = false
+  }
+}
+
+// 只删除数据库会话；现有后端仍保留磁盘上的 Markdown 和附件。
+async function deleteChat(chat) {
+  if (loading.value) return
+  menuChatId.value = null
+  if (!window.confirm(`删除聊天“${chat.title}”？Markdown 文件仍保留。`)) return
+  loading.value = true
+  error.value = ''
+  try {
+    await requestJson(`/chat/history/${encodeURIComponent(chat.id)}`, {
+      method: 'DELETE',
+    })
+    savedChats.value = savedChats.value.filter(item => item.id !== chat.id)
+    if (conversationId.value === chat.id) {
+      conversationId.value = null
+      messages.value = []
+      input.value = ''
+      streamingText.value = ''
+      rememberSelectedChat()
+    }
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    loading.value = false
+  }
+}
+
+// Enter 发送，Shift+Enter 换行；中文输入法选字时不发送。
+function handleComposerKeydown(event) {
+  // 其他按键和 Shift+Enter 保留输入框原来的行为。
+  if (event.key !== 'Enter' || event.shiftKey) return
+
+  // 中文输入法按 Enter 确认文字时，不触发发送。
+  if (event.isComposing || event.keyCode === 229) return
+
+  // 阻止普通 Enter 在输入框中插入换行。
+  event.preventDefault()
+
+  // 按住 Enter 或正在等待回答时，不重复发送。
+  if (event.repeat || loading.value) return
+
+  // 复用现有发送函数，空消息仍由 send 拦截。
+  send()
+}
+
+// 发送仍走流式接口；消息入库由后端负责，前端不要重复保存。
+async function send() {
+  const text = input.value.trim()
+  if (!text || loading.value) return
+  if (!conversationId.value && !(await newChat())) return
+
+  streamingText.value = ''
+  followLatest.value = true
+  messages.value.push({ role: 'user', content: text })
+  input.value = ''
+  loading.value = true
+  progress.value = '正在连接 Agent…'
   error.value = ''
 
   try {
-    // FormData 用于发送文件，由浏览器自动设置请求格式。
+    const response = await fetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        // 只提交本次问题；过去的对话由后端从数据库读取。
+      messages: [{ role: 'user', content: text }],
+        conversation_id: conversationId.value,
+      }),
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败：${response.status}，${await response.text()}`)
+    }
+
+    let completed = false
+    const toolNames = {
+      get_stock: '查询库存',
+      read_attachment: '读取附件',
+      save_report: '生成报告',
+      search_web: '联网搜索',
+    }
+
+    // 此回调只同步更新页面，不在其中启动未等待的历史请求。
+    await readChatStream(response, event => {
+      const name = toolNames[event.name] || event.name
+      if (event.type === 'start') progress.value = '正在理解任务…'
+      if (event.type === 'round_start') {
+        streamingText.value = ''
+        progress.value = '正在生成…'
+      }
+      if (event.type === 'text_delta') {
+        streamingText.value += event.text
+        progress.value = '正在生成…'
+      }
+      if (event.type === 'tool_start') {
+        streamingText.value = ''
+        progress.value = `正在${name}…`
+      }
+      if (event.type === 'tool_end') {
+        progress.value = event.result?.error
+          ? `${name}未成功，正在处理…`
+          : `${name}完成，正在处理下一步…`
+      }
+      if (event.type === 'error') throw new Error(event.message)
+      if (event.type === 'done') {
+        const data = event.data
+        conversationId.value = data.conversation_id
+        messages.value.push({
+          role: 'assistant',
+          content: data.reply,
+          tool_steps: data.tool_steps || [],
+        })
+        streamingText.value = ''
+        rememberSelectedChat()
+        completed = true
+      }
+    })
+    if (!completed) throw new Error('连接提前结束，未收到最终结果')
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    // 列表刷新失败与聊天失败分开提示，也不自动重发用户消息。
+    try {
+      await loadHistory()
+    } catch (err) {
+      const warning = `历史列表刷新失败：${err.message}`
+      error.value = error.value ? `${error.value}；${warning}` : warning
+    }
+    progress.value = ''
+    loading.value = false
+  }
+}
+
+// 页面刷新后，先加载后端列表，再按浏览器记住的编号恢复详情。
+onMounted(async () => {
+  loading.value = true
+  progress.value = '正在加载历史…'
+  try {
+    let selectedId = null
+    try {
+      selectedId = localStorage.getItem('agent-selected-chat')
+    } catch {
+      // 浏览器禁用本地存储时，仍可加载数据库列表。
+    }
+    await loadHistory()
+    const selected = savedChats.value.find(chat => chat.id === selectedId)
+    if (selected) {
+      const detail = await requestJson(`/chat/history/${encodeURIComponent(selected.id)}`)
+      applyChat(detail)
+    } else {
+      // 只移除失效的选中编号，不碰旧版 agent-chats 备份。
+      rememberSelectedChat()
+    }
+  } catch (err) {
+    error.value = `加载历史失败：${err.message}`
+  } finally {
+    progress.value = ''
+    loading.value = false
+  }
+})
+
+// 上传前等待后端建立会话，防止附件写到空编号或错误会话下。
+async function uploadAttachment(event) {
+  const file = event.target.files?.[0]
+  if (!file || loading.value) return
+  const draft = input.value
+  if (!conversationId.value) {
+    const created = await newChat()
+    if (!created) {
+      event.target.value = ''
+      return
+    }
+    // 新建会话会清空输入框，恢复上传前正在编写的问题。
+    input.value = draft
+  }
+  const chatId = conversationId.value
+  loading.value = true
+  error.value = ''
+  try {
     const formData = new FormData()
     formData.append('file', file)
-
-    const response = await fetch(`/chat/upload/${chatId}`, {
+    const response = await fetch(`/chat/upload/${encodeURIComponent(chatId)}`, {
       method: 'POST',
       body: formData,
     })
-    if (!response.ok) {
-      throw new Error(`上传失败：${await response.text()}`)
-    }
-
+    if (!response.ok) throw new Error(`上传失败：${await response.text()}`)
     const data = await response.json()
-
-    // 将附件信息加入草稿，保留用户已经输入的问题。
     const attachment = `附件：${data.filename}\n附件编号：${data.file_id}`
     input.value = input.value.trim()
       ? `${input.value}\n\n${attachment}`
@@ -336,7 +370,7 @@ async function uploadAttachment(event) {
     error.value = err.message
   } finally {
     loading.value = false
-    event.target.value = '' // 允许再次选择同一个文件。
+    event.target.value = ''
   }
 }
 </script>
@@ -453,12 +487,14 @@ async function uploadAttachment(event) {
         </label>
 
         <!-- 用多行输入框展示问题和附件编号。 -->
+<!-- 监听键盘：Enter 发送，Shift+Enter 保留换行。 -->
         <textarea
           v-model="input"
           aria-label="消息"
           placeholder="输入问题，或上传资料…"
           rows="3"
           :disabled="loading"
+          @keydown="handleComposerKeydown"
         ></textarea>
 
         <button :disabled="loading || !input.trim()">发送</button>

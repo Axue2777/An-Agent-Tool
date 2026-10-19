@@ -145,3 +145,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #397b64; outline-
   border-radius: 6px;
   background: #fff;
 }
+
+/* 标题与复制按钮左右排列，按钮尺寸固定，切换图标时不跳动。 */
+.message-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.copy-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; border: 0; border-radius: 6px; background: transparent; color: #666; }
+@media (hover: hover) {
+  .copy-button:hover { background: #eee; color: #222; }
+}

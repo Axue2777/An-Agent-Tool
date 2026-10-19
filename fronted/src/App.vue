@@ -1,5 +1,6 @@
 <script setup>
-import { ref, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, onMounted, computed, watch, nextTick, onUnmounted } from 'vue'
+import { Copy, Check } from '@lucide/vue'
 import { marked } from 'marked'
 import { readChatStream } from './chat_stream'
 import DOMPurify from 'dompurify'
@@ -23,6 +24,24 @@ const currentChatTitle = computed(() => {
   const chat = savedChats.value.find(item => item.id === conversationId.value)
   return chat?.title || 'Agent 聊天'
 })
+
+// 记录哪条消息刚复制成功，以及恢复图标的定时器。
+const copiedMessage = ref(null)
+let copyTimer = null
+
+// 复制原始 Markdown，而不是页面转换后的 HTML。
+async function copyMessage(message) {
+  try {
+    await navigator.clipboard.writeText(message.content)
+    copiedMessage.value = message
+    clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => {
+      copiedMessage.value = null
+    }, 1500)
+  } catch {
+    error.value = '复制失败，请检查浏览器的剪贴板权限。'
+  }
+}
 
 // Markdown 转换后再清理 HTML，避免直接插入不可信内容。
 function renderMarkdown(content) {
@@ -308,34 +327,6 @@ async function send() {
   }
 }
 
-// 页面刷新后，先加载后端列表，再按浏览器记住的编号恢复详情。
-onMounted(async () => {
-  loading.value = true
-  progress.value = '正在加载历史…'
-  try {
-    let selectedId = null
-    try {
-      selectedId = localStorage.getItem('agent-selected-chat')
-    } catch {
-      // 浏览器禁用本地存储时，仍可加载数据库列表。
-    }
-    await loadHistory()
-    const selected = savedChats.value.find(chat => chat.id === selectedId)
-    if (selected) {
-      const detail = await requestJson(`/chat/history/${encodeURIComponent(selected.id)}`)
-      applyChat(detail)
-    } else {
-      // 只移除失效的选中编号，不碰旧版 agent-chats 备份。
-      rememberSelectedChat()
-    }
-  } catch (err) {
-    error.value = `加载历史失败：${err.message}`
-  } finally {
-    progress.value = ''
-    loading.value = false
-  }
-})
-
 // 上传前等待后端建立会话，防止附件写到空编号或错误会话下。
 async function uploadAttachment(event) {
   const file = event.target.files?.[0]
@@ -373,6 +364,39 @@ async function uploadAttachment(event) {
     event.target.value = ''
   }
 }
+
+// 页面刷新后，先加载后端列表，再按浏览器记住的编号恢复详情。
+onMounted(async () => {
+  loading.value = true
+  progress.value = '正在加载历史…'
+  try {
+    let selectedId = null
+    try {
+      selectedId = localStorage.getItem('agent-selected-chat')
+    } catch {
+      // 浏览器禁用本地存储时，仍可加载数据库列表。
+    }
+    await loadHistory()
+    const selected = savedChats.value.find(chat => chat.id === selectedId)
+    if (selected) {
+      const detail = await requestJson(`/chat/history/${encodeURIComponent(selected.id)}`)
+      applyChat(detail)
+    } else {
+      // 只移除失效的选中编号，不碰旧版 agent-chats 备份。
+      rememberSelectedChat()
+    }
+  } catch (err) {
+    error.value = `加载历史失败：${err.message}`
+  } finally {
+    progress.value = ''
+    loading.value = false
+  }
+})
+
+// 页面卸载时取消定时器，避免遗留任务。
+onUnmounted(() => clearTimeout(copyTimer))
+
+
 </script>
 
 <template>
@@ -432,7 +456,17 @@ async function uploadAttachment(event) {
         @scroll="handleMessageScroll"
       >
         <article v-for="(message, index) in messages" :key="index">
-          <strong>{{ message.role === 'user' ? '你' : '助手' }}</strong>
+          <!-- 助手回答显示复制按钮，用户消息保持原样。 -->
+          <div class="message-header">
+            <strong>{{ message.role === 'user' ? '你' : '助手' }}</strong>
+            <button v-if="message.role === 'assistant'"
+              type="button" class="copy-button"
+              :title="copiedMessage === message ? '已复制' : '复制回答'"
+              :aria-label="copiedMessage === message ? '已复制' : '复制回答'"
+              @click="copyMessage(message)">
+              <component :is="copiedMessage === message ? Check : Copy" :size="16" />
+            </button>
+          </div>
           <!-- 展示 Markdown 正文；原始消息仍用于接口请求和记录保存。 -->
           <div class="markdown-body" v-html="renderMarkdown(message.content)"></div>
           <!-- 有工具调用时显示可展开的执行记录。 -->

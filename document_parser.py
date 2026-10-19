@@ -26,11 +26,13 @@ def parse_document(content: bytes, suffix: str) -> str:
             # 当前页没有可提取文字时，转为图片进行识别。
             if not text.strip():
                 text = extract_pdf_page_text(content, number - 1)
-                if not text:
+                if not text.strip():
                     raise ValueError(
                         f"第 {number} 页未识别到文字，可能为空白页或图片不清晰"
                     )
-                text = "[本页文字由 OCR 识别，可能存在错字]\n" + text           
+                text = "[本页文字由 OCR 识别，可能存在错字]\n" + text
+            # 文本页和 OCR 页都加入结果，保持原始顺序并保留页码。
+            parts.append(f"## 第 {number} 页\n\n{text}")
         return "\n\n".join(parts)
 
     if suffix == ".docx":

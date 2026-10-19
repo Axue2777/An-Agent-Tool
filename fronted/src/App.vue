@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed, watch, nextTick, onUnmounted } from 'vue'
-import { Copy, Check } from '@lucide/vue'
+import { Copy, Check, Square } from '@lucide/vue'
 import { marked } from 'marked'
 import { readChatStream } from './chat_stream'
 import DOMPurify from 'dompurify'
@@ -20,7 +20,9 @@ const progress = ref('')
 const streamingText = ref('')
 const messageList = ref(null)
 const followLatest = ref(true)
-
+// 当前任务编号和停止请求状态。
+const activeTaskId = ref(null)
+const stopping = ref(false)
 // 标题跟随当前选中的会话。
 const currentChatTitle = computed(() => {
   const chat = savedChats.value.find(item => item.id === conversationId.value)
@@ -242,6 +244,25 @@ function handleComposerKeydown(event) {
   send()
 }
 
+
+// 通知后端取消任务，仍等待事件流返回最终状态。
+async function stopGeneration() {
+  const id = activeTaskId.value
+  if (!id || stopping.value) return
+  stopping.value = true
+  try {
+    await requestJson(`/chat/tasks/${id}/cancel`, { method: 'POST' })
+  } catch (err) {
+    if (activeTaskId.value === id) {
+      stopping.value = false
+      error.value = `停止失败：${err.message}`
+    }
+  }
+  stopping.value=false
+  loading.value=false
+  activeTaskId.value=null
+}
+
 // 发送仍走流式接口；消息入库由后端负责，前端不要重复保存。
 async function send() {
   const text = input.value.trim()
@@ -255,6 +276,7 @@ async function send() {
   loading.value = true
   progress.value = '正在连接 Agent…'
   error.value = ''
+  activeTaskId.value = null
 
   try {
     const response = await fetch('/chat/stream', {
@@ -279,10 +301,26 @@ async function send() {
       search_web: '联网搜索',
     }
 
+
     // 此回调只同步更新页面，不在其中启动未等待的历史请求。
     await readChatStream(response, event => {
       const name = toolNames[event.name] || event.name
-      if (event.type === 'start') progress.value = '正在理解任务…'
+      if (event.type === 'start') {
+        activeTaskId.value = event.task_id
+        progress.value = '正在理解任务…'
+        return
+      }
+      // 后端确认已经停止，显示固定回复并清除临时文字。
+      if (event.type === 'cancelled') {
+        messages.value.push({
+          role: 'assistant', content: '对话内容被主动停止',
+        })
+        streamingText.value = ''
+        completed = true // 主动停止也是正常结束，不能当作连接异常。
+        return
+      }
+      // 停止等待期间冻结文字，但仍接收最终完成或错误通知。
+      if (stopping.value && !['done', 'error'].includes(event.type)) return
       if (event.type === 'round_start') {
         streamingText.value = ''
         progress.value = '正在生成…'
@@ -318,6 +356,7 @@ async function send() {
   } catch (err) {
     error.value = err.message
   } finally {
+    stopping.value = false
     // 列表刷新失败与聊天失败分开提示，也不自动重发用户消息。
     try {
       await loadHistory()
@@ -404,6 +443,7 @@ onUnmounted(() => clearTimeout(copyTimer))
 
 <template>
   <div class="workspace" :class="{ collapsed: !sidebarOpen }">
+    // collapsed 是否折叠
     <aside v-if="sidebarOpen" class="sidebar">
       <header class="sidebar-header">
         <strong>Agent 工作台</strong>
@@ -500,7 +540,7 @@ onUnmounted(() => clearTimeout(copyTimer))
         </article>
         <!-- 随后端事件更新状态；上传资料时使用默认提示。 -->
         <p v-if="loading" role="status">
-          {{ progress || '正在上传并解析资料…' }}
+          {{ stopping ? '正在停止生成…' : (progress || '正在上传并解析资料…') }}
         </p>
         <p v-if="error" class="error" role="alert">{{ error }}</p>
       </section>
@@ -541,7 +581,13 @@ onUnmounted(() => clearTimeout(copyTimer))
           @keydown="handleComposerKeydown"
         ></textarea>
 
-        <button :disabled="loading || !input.trim()">发送</button>
+        <!-- 停止按钮不是提交按钮，不能再次触发 send。 -->
+        <button v-if="activeTaskId" type="button" :disabled="stopping"
+          @click="stopGeneration">
+          停止
+          <!-- <Square :size="18" /> -->
+        </button>
+        <button v-else :disabled="loading || !input.trim()">发送</button>
       </form>
     </main>
   </div>

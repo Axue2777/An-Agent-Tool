@@ -21,6 +21,9 @@ def request_stream_message(client, messages, tools, tool_choice, on_event=None):
         extra_body={"thinking": {"type": "disabled"}},
     ) as stream:
         for chunk in stream:
+            # 每收到一个数据块就检查取消，包括只有工具参数的数据块。
+            if on_event:
+                on_event({"type": "checkpoint"})
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]

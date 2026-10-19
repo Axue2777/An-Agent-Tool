@@ -4,7 +4,7 @@ import uvicorn
 import traceback
 import json
 from queue import Queue, Empty
-from threading import Thread
+from threading import Thread, Event, Lock
 from fastapi.responses import StreamingResponse
 from fastapi import FastAPI,HTTPException,UploadFile, File
 from openai import OpenAI
@@ -34,6 +34,37 @@ app = FastAPI()
 
 # 本地示例在应用导入时创建所需表，重新加载不会清空数据。
 init_db()
+
+# 保存正在运行的任务：任务编号对应一个停止信号。
+active_tasks: dict[str, Event] = {}
+
+# 保护任务列表，避免不同线程同时修改。
+task_lock = Lock()
+
+
+# 使用专门的异常区分“用户停止”和“程序出错”。
+class TaskCancelled(Exception):
+    pass
+
+
+# 生成过程中主动检查；收到停止信号后退出后续执行。
+def check_cancelled(stop_event):
+    if stop_event is not None and stop_event.is_set():
+        raise TaskCancelled("用户停止生成")
+
+
+# 前端点击停止后，调用此接口设置对应任务的停止信号。
+@app.post("/chat/tasks/{task_id}/cancel", tags=["AI操作"], status_code=202)
+def cancel_chat_task(task_id: UUID):
+    with task_lock:
+        stop_event = active_tasks.get(str(task_id))
+        if stop_event is None:
+            return {"status": "not_running"}
+
+        stop_event.set()
+
+    # 表示已经发出信号，不表示后台线程此刻已经退出。
+    return {"status": "cancelling"}
 
 # 从 main.py 所在目录加载配置，不受终端所在位置影响。
 # 以项目 .env 配置为准，覆盖终端中可能残留的旧密钥。
@@ -106,7 +137,7 @@ def delete_chat(conversation_id: UUID):
 
 # 普通 HTTP 请求不传回调；事件流接口通过它接收进度。
 # 统一处理聊天、工具调用和 Markdown 记录，供两个接口复用。
-def process_chat(request: ChatRequest, on_event=None):
+def process_chat(request: ChatRequest, on_event=None, stop_event=None):
     if request.messages[-1].role != "user":
         raise HTTPException(status_code=422, detail="最后一条必须是用户消息")
     conversation_id = request.conversation_id or uuid4()
@@ -115,14 +146,46 @@ def process_chat(request: ChatRequest, on_event=None):
     append_record(conversation_id, "用户", request.messages[-1].content)
     # 最新用户消息在上方已经入库，这里读取时自然包含本次问题。
     history = get_recent_messages(conversation_id)
+    # 暂存当前轮文字，取消时只写入 Markdown，不作为完整回答入库。
+    partial_reply = []
+
+    # 统一处理生成事件，并在安全检查点响应停止信号。
+    def emit(event):
+        event_type = event["type"]
+        # 工具已执行完时，先允许它记录真实结果，再停止后续步骤。
+        if event_type != "tool_end":
+            check_cancelled(stop_event)
+        if event_type in {"round_start", "tool_start"}:
+            partial_reply.clear()
+        elif event_type == "text_delta":
+            partial_reply.append(event["text"])
+        # checkpoint 仅供后端检查，不发送到网页。
+        if event_type != "checkpoint" and on_event:
+            on_event(event)
     try:
       # 接收最终回答和本轮执行步骤。
         reply, tool_steps = run_agent(
             client, history, conversation_id,
-            on_event=on_event,
+            on_event=emit,
             web_search=request.web_search,
         )
+        # 完整回答入库前，再检查一次是否收到停止请求。
+        check_cancelled(stop_event)
     except Exception as error:
+        # 用户取消不当作服务器错误，也不保存成完整助手回答。
+        if isinstance(error, TaskCancelled) or (
+            stop_event is not None and stop_event.is_set()
+        ):
+            if partial_reply:
+                append_record(
+                    conversation_id, "助手（已停止，内容不完整）",
+                    "".join(partial_reply),
+                )
+            append_record(conversation_id, "状态", "用户停止生成")
+            # 保存停止提示，刷新后仍显示；不保存为完整生成结果。
+            save_assistant_message(conversation_id, "对话内容被主动停止", [])
+            append_record(conversation_id, "助手", "对话内容被主动停止")
+            raise TaskCancelled("用户停止生成") from error
         # 将具体出错位置打印到后端终端，便于定位。
         traceback.print_exc()
 
@@ -214,31 +277,49 @@ async def upload_file(
 @app.post("/chat/stream", tags=["AI操作"])
 def stream_chat(request: ChatRequest):
     events = Queue()
+    task_id = str(uuid4())
+    stop_event = Event()
 
-    # 后台线程运行任务，队列将进度交给响应生成器。
+    # 后台执行聊天，分别报告完成、主动取消和运行错误。
     def worker():
         try:
-            # 内部调用处理函数，将实时进度放入当前请求的队列。
-            result = process_chat(request, on_event=events.put)
+            result = process_chat(
+                request,
+                on_event=events.put,
+                stop_event=stop_event,
+            )
             events.put({"type": "done", "data": result})
+        except TaskCancelled:
+            events.put({"type": "cancelled", "task_id": task_id})
         except Exception:
             events.put({"type": "error", "message": "任务失败，请查看后端终端"})
         finally:
+            with task_lock:
+                active_tasks.pop(task_id, None)
             events.put(None)
 
-    # 按 SSE 格式逐条发送；心跳用于避免连接长期没有数据。
+    # 登记任务，再把编号通过 start 事件交给前端。
     def generate():
-        yield 'data: {"type":"start"}\n\n'
-        Thread(target=worker, daemon=True).start()
-        while True:
-            try:
-                event = events.get(timeout=10)
-            except Empty:
-                yield ": heartbeat\n\n"
-                continue
-            if event is None:
-                break
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        with task_lock:
+            active_tasks[task_id] = stop_event
+        try:
+            Thread(target=worker, daemon=True).start()
+            start = {"type": "start", "task_id": task_id}
+            yield f"data: {json.dumps(start, ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    event = events.get(timeout=10)
+                except Empty:
+                    yield ": heartbeat\n\n"
+                    continue
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            # 生成器退出时发出停止信号，并清理登记。
+            stop_event.set()
+            with task_lock:
+                active_tasks.pop(task_id, None)
 
     return StreamingResponse(
         generate(),

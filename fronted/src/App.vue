@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed, watch, nextTick, onUnmounted } from 'vue'
-import { Copy, Check, Square } from '@lucide/vue'
+import { Copy, Check, Square, Download } from '@lucide/vue'
 import { marked } from 'marked'
 import { readChatStream } from './chat_stream'
 import DOMPurify from 'dompurify'
@@ -23,6 +23,7 @@ const followLatest = ref(true)
 // 当前任务编号和停止请求状态。
 const activeTaskId = ref(null)
 const stopping = ref(false)
+const exporting = ref(false)
 // 标题跟随当前选中的会话。
 const currentChatTitle = computed(() => {
   const chat = savedChats.value.find(item => item.id === conversationId.value)
@@ -44,6 +45,34 @@ async function copyMessage(message) {
     }, 1500)
   } catch {
     error.value = '复制失败，请检查浏览器的剪贴板权限。'
+  }
+}
+
+// 下载服务器保存的记录，失败时在当前页面显示错误。
+async function exportChat() {
+  const id = conversationId.value
+  if (!id || loading.value || exporting.value) return
+  exporting.value = true
+  error.value = ''
+  try {
+    const response = await fetch(`/chat/history/${id}/export`)
+    if (!response.ok) {
+      const data = await response.json().catch(() => null)
+      throw new Error(data?.detail || `导出失败：${response.status}`)
+    }
+    // Blob 是文件数据；临时地址供浏览器触发下载。
+    const url = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `chat-${id}.md`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    exporting.value = false
   }
 }
 
@@ -490,6 +519,12 @@ onUnmounted(() => clearTimeout(copyTimer))
         <span class="current-chat-title" :title="currentChatTitle">
           {{ currentChatTitle }}
         </span>
+        <!-- 生成期间禁止导出，避免下载到尚未写完的记录。 -->
+        <button type="button" class="icon-button export-chat"
+          :disabled="loading || exporting || !conversationId || !messages.length"
+          title="导出 Markdown" aria-label="导出 Markdown" @click="exportChat">
+          <Download :size="18" />
+        </button>
       </header>
       <!-- 获取消息容器，并监听用户是否主动向上浏览。 -->
       <section

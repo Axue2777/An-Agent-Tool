@@ -1,213 +1,576 @@
-* { box-sizing: border-box; }
-body { margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; color: #252525; background: #fff; }
-button, input { font: inherit; }
-button { cursor: pointer; }
-button:disabled { cursor: default; opacity: .45; }
-.workspace { display: grid; grid-template-columns: 250px minmax(0, 1fr); height: 100dvh; }
-.workspace.collapsed { grid-template-columns: minmax(0, 1fr); }
-.sidebar { display: flex; flex-direction: column; min-height: 0; padding: 12px; background: #f5f5f5; border-right: 1px solid #e8e8e8; }
-.sidebar-header { display: flex; align-items: center; justify-content: space-between; height: 44px; }
-.icon-button { width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; font-size: 24px; }
-.sidebar-item { display: block; width: 100%; padding: 10px 12px; border: 0; border-radius: 6px; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history { flex: 1; overflow-y: auto; margin-top: 12px; }
-.chat-area { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.chat-header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; min-height: 56px; }
-.message-list { flex: 1; min-height: 0; overflow-y: auto; padding: 24px max(20px, calc((100% - 760px) / 2)); }
-article { padding: 16px 0; }
-p { line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
-.composer { display: flex; gap: 8px; width: calc(100% - 40px); max-width: 760px; margin: 16px auto 24px; }
-.composer input { flex: 1; min-width: 0; padding: 14px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
-.composer button { padding: 0 16px; border: 1px solid #ddd; border-radius: 8px; background: #f5f5f5; }
-.composerSearch { display: flex; gap: 8px; width: calc(100% - 40px); max-width: 760px; margin: 16px auto 24px; }
-.composerSearch button { padding: 0 16px; border: 1px solid #ddd; border-radius: 8px; background: #f5f5f5; }
+/* 1. 基础变量：集中管理颜色、尺寸和字体，便于统一调整。 */
+:root {
+  font-family: Arial, "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  color: #252525;
+  background: #fff;
+  --surface: #fff;
+  --surface-muted: #f5f5f5;
+  --surface-hover: #e8e8e8;
+  --surface-selected: #dedede;
+  --border: #d5d5d5;
+  --border-soft: #e8e8e8;
+  --text-muted: #666;
+  --accent: #397b64;
+  --danger: #b42318;
+  --radius: 6px;
+  --content-width: 760px;
+  --sidebar-width: 250px;
+  --composer-height: 104px;
+}
 
-.error { color: #b42318; }
-button:focus-visible, input:focus-visible { outline: 2px solid #397b64; outline-offset: 2px; }
-@media (hover: hover) {
-  .sidebar-item:hover:not(:disabled), .icon-button:hover, .composer button:hover:not(:disabled) { background: #e8e8e8; }
+* {
+  box-sizing: border-box;
 }
-@media (max-width: 640px) {
-  .workspace { grid-template-columns: min(42vw, 250px) minmax(0, 1fr); }
-  .workspace.collapsed { grid-template-columns: minmax(0, 1fr); }
-  .sidebar { padding: 8px; }
-  .sidebar-header strong { font-size: 14px; overflow-wrap: anywhere; }
+
+body {
+  margin: 0;
 }
-.history-row { display: flex; align-items: center; border-radius: 6px; }
-.history-title { flex: 1; min-width: 0; width: auto; }
-.more-button { flex: 0 0 30px; height: 30px; margin-right: 4px; border: 0; border-radius: 6px; background: transparent; opacity: 0; pointer-events: none; font-size: 22px; }
-.history-row:hover .more-button, .history-row:focus-within .more-button, .more-button.visible { opacity: 1; pointer-events: auto; }
-.chat-options { display: flex; flex-direction: column; margin: 4px 4px 8px; padding: 4px; border: 1px solid #ddd; border-radius: 6px; background: white; }
-.chat-options button { padding: 8px 12px; border: 0; border-radius: 4px; background: transparent; text-align: left; }
-.delete-option { color: #b42318; }
-@media (hover: hover) {
-  .more-button:hover:not(:disabled), .chat-options button:hover:not(:disabled) { background: #e8e8e8; }
+
+button,
+input,
+textarea {
+  font: inherit;
 }
-@media (hover: none) {
-  .more-button { opacity: 1; pointer-events: auto; }
+
+button,
+input,
+textarea,
+a {
+  -webkit-tap-highlight-color: transparent;
 }
-.new-chat-button {
-  margin: 8px 0;
+
+button {
+  color: inherit;
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled {
+  cursor: default;
+}
+
+button:disabled {
+  opacity: .45;
+}
+
+:where(button, input, textarea, a, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+/* 2. 页面布局：固定工作区，仅历史列表和消息区独立滚动。 */
+.workspace {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.workspace.collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sidebar,
+.chat-area {
+  min-width: 0;
+  min-height: 0;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
   padding: 12px;
-  text-align: center;
-  border: 1px solid #d5d5d5;
-  border-radius: 6px;
-  background: #ffffff;
-}
-/* 当前聊天保持深色背景，标题按钮覆盖整行的同色背景。 */
-.history-row.selected {
-  background: #dedede;
+  background: var(--surface-muted);
+  border-right: 1px solid var(--border-soft);
 }
 
-.history-row.selected .history-title {
+.sidebar-header,
+.chat-header,
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sidebar-header {
+  justify-content: space-between;
+  min-height: 44px;
+}
+
+.sidebar-header strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.icon-button,
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
   background: transparent;
 }
 
-/* 鼠标悬停时进一步加深当前聊天的标题区域。 */
-@media (hover: hover) {
-  .history-row.selected .history-title:hover:not(:disabled) {
-    background: #d2d2d2;
-  }
+.icon-button {
+  font-size: 24px;
 }
 
-/* Markdown 正文：恢复正常排版，避免继承原来的保留换行样式。 */
-.markdown-body { line-height: 1.7; overflow-wrap: anywhere; }
-.markdown-body p { white-space: normal; }
-.markdown-body h1 { font-size: 24px; }
-.markdown-body h2 { font-size: 20px; }
-.markdown-body h3 { font-size: 18px; }
-.markdown-body ul, .markdown-body ol { padding-left: 24px; }
-/* 代码块保留缩进，较长代码在块内横向滚动。 */
-.markdown-body pre { padding: 16px; overflow-x: auto; border-radius: 6px; background: #f3f4f6; }
-.markdown-body code { font-family: Consolas, monospace; }
-.markdown-body :not(pre) > code { padding: 2px 4px; background: #f3f4f6; border-radius: 4px; }
-.markdown-body blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid #ccc; color: #666; }
-.markdown-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
-.markdown-body th, .markdown-body td { padding: 8px; border: 1px solid #ddd; }
-.markdown-body img { max-width: 100%; height: auto; }
+.history {
+  flex: 1;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 
-/* 长标题显示省略号，悬停时通过 title 查看完整名称。 */
+.sidebar-item {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-button {
+  flex-shrink: 0;
+  margin: 8px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  text-align: center;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius);
+}
+
+.history-row.selected {
+  background: var(--surface-selected);
+}
+
+.history-title {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.more-button {
+  flex: 0 0 30px;
+  height: 30px;
+  margin-right: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  font-size: 22px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 隐藏更多按钮时仍保留位置，悬停后标题不会跳动。 */
+.history-row:hover .more-button,
+.history-row:focus-within .more-button,
+.more-button.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-options {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 4px 8px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.chat-options button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.delete-option {
+  color: var(--danger);
+}
+
+/* 根据聊天区实际宽度适配输入区，侧栏展开时也能正确判断。 */
+.chat-area {
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+}
+
+.chat-header {
+  flex-shrink: 0;
+  min-height: 56px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
 .current-chat-title {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* 展开侧栏按钮保持固定宽度，不被长标题挤压。 */
-.chat-header .icon-button {
-  flex-shrink: 0;
+.export-chat {
+  margin-left: auto;
 }
 
-/* 执行记录默认收起，展开后显示参数和结果。 */
-.tool-details { margin-top: 12px; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
-.tool-details summary { cursor: pointer; color: #555; }
-.tool-details section { padding-top: 12px; }
-.tool-details pre { overflow-x: auto; padding: 12px; background: #f5f5f5; }
+.message-list {
+  flex: 1;
+  min-height: 0;
+  padding: 24px max(20px, calc((100% - var(--content-width)) / 2));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
 
-/* 将工具返回的文件链接显示为下载按钮。 */
+.message-list > article {
+  min-width: 0;
+  padding: 16px 0;
+}
+
+.message-header {
+  justify-content: space-between;
+  min-height: 32px;
+}
+
+.copy-button {
+  color: var(--text-muted);
+}
+
+.message-list > p,
+.tool-details p {
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  color: var(--danger);
+}
+
+.latest-bar {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: center;
+  padding: 4px 12px;
+}
+
+.latest-bar button,
+.report-download {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+}
+
+/* 3. Markdown：长代码和表格只在各自区域内滚动。 */
+.markdown-body {
+  min-width: 0;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.markdown-body p {
+  white-space: normal;
+}
+
+.markdown-body h1 { font-size: 24px; }
+.markdown-body h2 { font-size: 20px; }
+.markdown-body h3 { font-size: 18px; }
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 24px;
+}
+
+.markdown-body pre,
+.tool-details pre {
+  max-width: 100%;
+  padding: 16px;
+  overflow-x: auto;
+  border-radius: var(--radius);
+  background: #f3f4f6;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.markdown-body code,
+.tool-details pre {
+  font-family: Consolas, monospace;
+}
+
+.markdown-body :not(pre) > code {
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: #f3f4f6;
+}
+
+.markdown-body blockquote {
+  margin-left: 0;
+  padding-left: 16px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+
+.markdown-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  overflow-wrap: normal;
+}
+
+.markdown-body th,
+.markdown-body td {
+  min-width: 96px;
+  padding: 8px;
+  border: 1px solid var(--border);
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.markdown-body a {
+  color: #24638e;
+  text-underline-offset: 3px;
+}
+
+.tool-details {
+  min-width: 0;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.tool-details summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.tool-details section {
+  min-width: 0;
+  padding-top: 12px;
+}
+
 .report-download {
   display: inline-block;
-  padding: 8px 12px;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  color: #252525;
-  background: #fff;
+  max-width: 100%;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
+/* 4. 输入区：左侧两个工具等高分布，总高度与输入框一致。 */
+.bottom-composer {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr) 52px;
+  gap: 8px;
+  align-items: stretch;
+  flex-shrink: 0;
+  width: calc(100% - 40px);
+  max-width: var(--content-width);
+  height: var(--composer-height);
+  margin: 16px auto max(24px, env(safe-area-inset-bottom, 0px));
+}
+
+.composer-tools {
+  display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  min-height: 0;
+  gap: 8px;
+}
+
+.composer-tool,
+.composer-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #f7f7f7;
+  color: inherit;
+  cursor: pointer;
+}
+
+.composer-tool {
+  position: relative;
+  min-height: 0;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.search-tool {
+  width: 100%;
+}
+
+.search-tool[aria-pressed="true"] {
+  border-color: #aaa;
+  background: var(--surface-hover);
+}
+
+.composer-tool.is-disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+/* 保留原生文件选择与键盘聚焦，上传方框的整个区域均可点击。 */
+.upload-picker {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.upload-picker:disabled {
+  cursor: default;
+}
+
+.upload-tool:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.composer-editor {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 16px;
+  line-height: 1.5;
+  resize: none;
+}
+
+.composer-editor::placeholder {
+  color: #777;
+}
+
+.composer-editor:disabled {
+  background: #fafafa;
+}
+
+/* 5. 交互状态：禁用控件不显示悬停反馈，选中状态单独处理。 */
 @media (hover: hover) {
-  .report-download:hover {
-    background: #e8e8e8;
+  .sidebar-item:not(:disabled):hover,
+  .icon-button:not(:disabled):hover,
+  .more-button:not(:disabled):hover,
+  .chat-options button:not(:disabled):hover,
+  .copy-button:not(:disabled):hover,
+  .latest-bar button:not(:disabled):hover,
+  .report-download:hover,
+  .composer-tool:not(:disabled):not(.is-disabled):hover,
+  .composer-action:not(:disabled):hover {
+    background: var(--surface-hover);
+  }
+
+  .history-row.selected .history-title:not(:disabled):hover {
+    background: #d2d2d2;
+  }
+
+  .search-tool[aria-pressed="true"]:not(:disabled):hover {
+    background: #dedede;
   }
 }
 
-/* 上传按钮保留原生文件选择能力，同时支持键盘操作。 */
-.attachment-button { position: relative; align-self: center; padding: 10px; border: 1px solid #ddd; border-radius: 6px; white-space: nowrap; cursor: pointer; }
-.attachment-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
-.attachment-button:focus-within { outline: 2px solid #397b64; outline-offset: 2px; }
-.attachment-button.disabled { opacity: .45; cursor: default; }
-/* 多行输入框允许缩放，窄屏时保持在聊天区内。 */
-.composer textarea { flex: 1; min-width: 0; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font: inherit; resize: vertical; }
-@media (hover: hover) {
-  .attachment-button:not(.disabled):hover { background: #e8e8e8; }
+@media (hover: none) {
+  .more-button {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
+
+/* 6. 窄屏适配：保留输入框高度，仅将发送按钮移动到下一行。 */
+@container (max-width: 420px) {
+  .bottom-composer {
+    grid-template-columns: 88px minmax(0, 1fr);
+    grid-template-rows: var(--composer-height) 36px;
+    width: calc(100% - 24px);
+    height: calc(var(--composer-height) + 44px);
+  }
+
+  .composer-action {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 640px) {
-  .composer { flex-wrap: wrap; }
-  .composer textarea { flex-basis: 100%; }
-}
+  .workspace {
+    --sidebar-width: min(38vw, 160px);
+  }
 
-/* 将回到最新按钮放在消息区与输入框之间。 */
-.latest-bar {
-  display: flex;
-  justify-content: center;
-}
+  .sidebar {
+    padding: 8px;
+  }
 
-.latest-bar button {
-  padding: 6px 12px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  background: #fff;
-}
+  .sidebar-header {
+    gap: 4px;
+  }
 
-/* 标题与复制按钮左右排列，按钮尺寸固定，切换图标时不跳动。 */
-.message-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.copy-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; border: 0; border-radius: 6px; background: transparent; color: #666; }
-@media (hover: hover) {
-  .copy-button:hover { background: #eee; color: #222; }
-}
+  .sidebar-header strong {
+    font-size: 14px;
+  }
 
-.inputText { height: 20px;}
+  .sidebar-item {
+    padding: 10px 8px;
+  }
 
-/* 三列：工具、可伸缩输入框、发送按钮；统一高度为 104px。 */
-.bottom-composer {
-  display: grid; grid-template-columns: 104px minmax(0, 1fr) 52px;
-  gap: 8px; align-items: stretch; flex-shrink: 0;
-  width: calc(100% - 32px); max-width: 760px;
-  height: 104px; margin: 16px auto 24px;
-}
-/* 左侧两格平分高度，间距也计入总高度。 */
-.composer-tools { display: grid; grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.composer-tool, .composer-action {
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  border: 1px solid #d5d5d5; border-radius: 6px;
-  background: #f7f7f7; color: #252525; cursor: pointer;
-}
-.composer-tool { position: relative; min-height: 0; font-size: 14px; white-space: nowrap; }
-.composer-tool input[type="checkbox"] { margin: 0; accent-color: #397b64; }
-/* 透明文件控件覆盖上传方框，整个方框都能点击。 */
-.upload-picker { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
-.bottom-composer .composer-editor {
-  display: block; width: 100%; min-width: 0; height: 100%; margin: 0;
-  padding: 12px; border: 1px solid #d5d5d5; border-radius: 6px;
-  font: inherit; line-height: 1.5; resize: none; background: #fff;
-}
-.composer-action { padding: 0; font: inherit; }
-.composer-tool.is-disabled { opacity: .45; cursor: default; }
-.composer-tool:focus-within, .composer-editor:focus-visible, .composer-action:focus-visible {
-  outline: 2px solid #397b64; outline-offset: 2px;
-}
-@media (hover: hover) {
-  .composer-tool:not(.is-disabled):hover, .composer-action:not(:disabled):hover { background: #e8e8e8; }
-}
-@media (max-width: 640px) {
-  .bottom-composer { grid-template-columns: 92px minmax(0, 1fr) 44px; gap: 6px; width: calc(100% - 16px); }
-}
+  .chat-header {
+    gap: 8px;
+    padding: 12px;
+  }
 
-/* 与上传资料使用相同外观，覆盖按钮的默认字体和内边距。 */
-.search-tool {
-  width: 100%;
-  padding: 0;
-  font-family: inherit;
-}
-
-/* 开启时轻微加深背景，便于区分状态，不改变尺寸。 */
-.search-tool[aria-pressed="true"] {
-  background: #e8e8e8;
-  border-color: #aaa;
-}
-
-/* 键盘操作时也能看到焦点。 */
-.search-tool:focus-visible {
-  outline: 2px solid #397b64;
-  outline-offset: 2px;
+  .message-list {
+    padding: 12px;
+  }
 }

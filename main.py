@@ -106,6 +106,21 @@ def history_detail(conversation_id: UUID):
         raise HTTPException(status_code=404, detail="聊天记录不存在")
     return result
 
+# 下载当前会话的原始 Markdown，包含聊天和工具执行记录。
+@app.get("/chat/history/{conversation_id}/export", tags=["聊天历史"])
+def export_chat(conversation_id: UUID):
+    if get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="聊天不存在")
+
+    path = RECORDS / str(conversation_id) / "chat.md"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="暂无可导出的记录")
+
+    return FileResponse(
+        path, media_type="text/markdown",
+        filename=f"chat-{conversation_id}.md",
+    )
+
 # 限制重命名请求的标题长度。
 class RenameChatRequest(BaseModel):
     title: str = Field(min_length=1, max_length=60)

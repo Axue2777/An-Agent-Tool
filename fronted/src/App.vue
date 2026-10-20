@@ -443,7 +443,7 @@ onUnmounted(() => clearTimeout(copyTimer))
 
 <template>
   <div class="workspace" :class="{ collapsed: !sidebarOpen }">
-    // collapsed 是否折叠
+    <!-- // collapsed 是否折叠 -->
     <aside v-if="sidebarOpen" class="sidebar">
       <header class="sidebar-header">
         <strong>Agent 工作台</strong>
@@ -550,44 +550,54 @@ onUnmounted(() => clearTimeout(copyTimer))
           ↓ 回到最新
         </button>
       </div>
-      <!-- 等待任务期间禁止切换，避免与当前请求的实际设置不一致。 -->
-      <div class="latest-bar">
-        <label>
-          <input v-model="webSearchEnabled" type="checkbox" :disabled="loading" />
-          联网搜索
-        </label>
-      </div>
-      <!-- 选择文件后自动上传；点击发送时，Agent 才开始分析。 -->
-      <form class="composer" @submit.prevent="send">
-        <label class="attachment-button" :class="{ disabled: loading }">
-          上传资料
-          <input
-            class="attachment-input"
-            type="file"
-            accept=".txt,.md,.pdf,.docx,.png,.jpg,.jpeg"
-            :disabled="loading"
-            @change="uploadAttachment"
-          />
-        </label>
 
-        <!-- 用多行输入框展示问题和附件编号。 -->
-<!-- 监听键盘：Enter 发送，Shift+Enter 保留换行。 -->
+      <!-- 统一表单：点击发送或按 Enter 都复用 send。 -->
+      <form class="bottom-composer" @submit.prevent="send">
+        <!-- 左侧两行工具，总高度与输入框一致。 -->
+        <div class="composer-tools">
+          <!-- 普通按钮切换联网状态；type="button" 避免触发表单发送。 -->
+          <button
+            type="button"
+            class="composer-tool search-tool"
+            :disabled="loading"
+            :aria-pressed="webSearchEnabled"
+            :title="webSearchEnabled ? '联网搜索已开启，点击关闭' : '联网搜索已关闭，点击开启'"
+            @click="webSearchEnabled = !webSearchEnabled"
+          >
+            联网搜索
+          </button>
+
+          <label class="composer-tool upload-tool" :class="{ 'is-disabled': loading }">
+            <span>上传资料</span>
+            <input
+              class="upload-picker"
+              type="file"
+              accept=".txt,.md,.pdf,.docx,.png,.jpg,.jpeg"
+              :disabled="loading"
+              aria-label="上传资料"
+              @change="uploadAttachment"
+            />
+          </label>
+        </div>
+
+        <!-- 禁止手动拉伸，保持与左侧工具总高度对齐。 -->
         <textarea
           v-model="input"
+          class="composer-editor"
           aria-label="消息"
           placeholder="输入问题，或上传资料…"
-          rows="3"
           :disabled="loading"
           @keydown="handleComposerKeydown"
         ></textarea>
 
-        <!-- 停止按钮不是提交按钮，不能再次触发 send。 -->
-        <button v-if="activeTaskId" type="button" :disabled="stopping"
-          @click="stopGeneration">
+        <button v-if="activeTaskId" class="composer-action" type="button"
+          :disabled="stopping" @click="stopGeneration">
           停止
-          <!-- <Square :size="18" /> -->
         </button>
-        <button v-else :disabled="loading || !input.trim()">发送</button>
+        <button v-else class="composer-action" type="submit"
+          :disabled="loading || !input.trim()">
+          发送
+        </button>
       </form>
     </main>
   </div>

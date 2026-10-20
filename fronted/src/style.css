@@ -18,6 +18,9 @@ p { line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer { display: flex; gap: 8px; width: calc(100% - 40px); max-width: 760px; margin: 16px auto 24px; }
 .composer input { flex: 1; min-width: 0; padding: 14px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
 .composer button { padding: 0 16px; border: 1px solid #ddd; border-radius: 8px; background: #f5f5f5; }
+.composerSearch { display: flex; gap: 8px; width: calc(100% - 40px); max-width: 760px; margin: 16px auto 24px; }
+.composerSearch button { padding: 0 16px; border: 1px solid #ddd; border-radius: 8px; background: #f5f5f5; }
+
 .error { color: #b42318; }
 button:focus-visible, input:focus-visible { outline: 2px solid #397b64; outline-offset: 2px; }
 @media (hover: hover) {
@@ -151,4 +154,60 @@ button:focus-visible, input:focus-visible { outline: 2px solid #397b64; outline-
 .copy-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; border: 0; border-radius: 6px; background: transparent; color: #666; }
 @media (hover: hover) {
   .copy-button:hover { background: #eee; color: #222; }
+}
+
+.inputText { height: 20px;}
+
+/* 三列：工具、可伸缩输入框、发送按钮；统一高度为 104px。 */
+.bottom-composer {
+  display: grid; grid-template-columns: 104px minmax(0, 1fr) 52px;
+  gap: 8px; align-items: stretch; flex-shrink: 0;
+  width: calc(100% - 32px); max-width: 760px;
+  height: 104px; margin: 16px auto 24px;
+}
+/* 左侧两格平分高度，间距也计入总高度。 */
+.composer-tools { display: grid; grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.composer-tool, .composer-action {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1px solid #d5d5d5; border-radius: 6px;
+  background: #f7f7f7; color: #252525; cursor: pointer;
+}
+.composer-tool { position: relative; min-height: 0; font-size: 14px; white-space: nowrap; }
+.composer-tool input[type="checkbox"] { margin: 0; accent-color: #397b64; }
+/* 透明文件控件覆盖上传方框，整个方框都能点击。 */
+.upload-picker { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.bottom-composer .composer-editor {
+  display: block; width: 100%; min-width: 0; height: 100%; margin: 0;
+  padding: 12px; border: 1px solid #d5d5d5; border-radius: 6px;
+  font: inherit; line-height: 1.5; resize: none; background: #fff;
+}
+.composer-action { padding: 0; font: inherit; }
+.composer-tool.is-disabled { opacity: .45; cursor: default; }
+.composer-tool:focus-within, .composer-editor:focus-visible, .composer-action:focus-visible {
+  outline: 2px solid #397b64; outline-offset: 2px;
+}
+@media (hover: hover) {
+  .composer-tool:not(.is-disabled):hover, .composer-action:not(:disabled):hover { background: #e8e8e8; }
+}
+@media (max-width: 640px) {
+  .bottom-composer { grid-template-columns: 92px minmax(0, 1fr) 44px; gap: 6px; width: calc(100% - 16px); }
+}
+
+/* 与上传资料使用相同外观，覆盖按钮的默认字体和内边距。 */
+.search-tool {
+  width: 100%;
+  padding: 0;
+  font-family: inherit;
+}
+
+/* 开启时轻微加深背景，便于区分状态，不改变尺寸。 */
+.search-tool[aria-pressed="true"] {
+  background: #e8e8e8;
+  border-color: #aaa;
+}
+
+/* 键盘操作时也能看到焦点。 */
+.search-tool:focus-visible {
+  outline: 2px solid #397b64;
+  outline-offset: 2px;
 }

@@ -52,7 +52,7 @@ records/：保存 Markdown 日志、附件与报告
 │   ├── src/chat_stream.js  # 浏览器事件流读取
 │   └── vite.config.js      # 开发时转发 /chat 请求
 ├── package.json            # 当前放在根目录的 Markdown 展示依赖
-├── pyproject.toml          # Python 项目信息，依赖清单待补齐
+├── pyproject.toml          # Python 项目信息和固定版本的后端依赖
 ├── .env.example            # 不含真实密钥的配置模板
 ├── GITHUB_UPLOAD.md        # 首次上传 GitHub 的操作说明
 ├── agent.db                # 运行后生成，不提交
@@ -81,7 +81,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install fastapi uvicorn httpx openai pydantic python-dotenv python-multipart pypdf python-docx pillow pytesseract pypdfium2 tzdata
 ```
 
-如果已经有可用的 .venv，可跳过创建环境。当前 pyproject.toml 和 uv.lock 只覆盖部分依赖，上面的完整安装命令用于补齐实际运行环境。
+如果已经有可用的 .venv，可跳过创建环境。项目已用 pyproject.toml 和 uv.lock 固定后端依赖；
+已安装 uv 的环境可以直接执行 uv sync --locked，替代手动逐个安装依赖。
 
 ### 2. 配置密钥
 
@@ -205,6 +206,19 @@ SQLite 从接入之后的新消息开始记录，旧 localStorage 和 Markdown �
 ## 开发与上传
 
 首次上传步骤见 [GITHUB_UPLOAD.md](GITHUB_UPLOAD.md)。
+
+### 自动检查
+
+本地完整检查命令：
+
+~~~powershell
+.\.venv\Scripts\python.exe tests\run_checks.py --browser
+~~~
+
+测试使用模拟模型、搜索和临时数据库，不需要真实 API 密钥。
+GitHub 配置位于 .github/workflows/checks.yml，推送或合并请求后自动检查，
+并保存报告和模拟页面截图；不会自动部署应用。
+完整操作说明及每一步的作用见 [tests/CI_GUIDE.md](tests/CI_GUIDE.md)。
 
 仓库保留源码、依赖清单、锁文件和空白配置模板。真实 .env、.venv、node_modules、agent.db、records、私人测试图片等通过 .gitignore 排除。
 

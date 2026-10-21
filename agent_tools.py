@@ -1,5 +1,7 @@
 import json
 from chat_records import append_record
+# 使用单调计时器测量耗时，不受系统时间调整影响。
+from time import perf_counter
 from file_tools import READ_ATTACHMENT_TOOL, read_attachment
 from report_tools import REPORT_TOOL, save_report
 from model_stream import request_stream_message
@@ -9,7 +11,8 @@ from zoneinfo import ZoneInfo
 
 # 示例库存：模型必须通过工具查询这些数量。
 INVENTORY = {"机械键盘": 12, "无线鼠标": 0, "显示器": 5}
-
+# 每个用户问题最多处理 8 次工具请求，失败或被拒绝也占名额。
+MAX_TOOL_CALLS = 8
 # 工具说明：告诉模型工具名称、用途和参数格式。
 TOOLS = [{
     "type": "function",
@@ -122,20 +125,20 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True):
         ),
     }, *history]
 
-    # 每次明确本轮权限，避免模型沿用历史里“搜索已关闭”的答复。
+    # 提醒模型如实说明未完成的部分，不能编造工具结果。
     messages[0]["content"] += (
-        "本轮联网搜索已开启，search_web 是你可以实际调用的工具。"
-        "用户明确要求联网搜索，或问题需要最新公开资料时，必须先调用 search_web 再回答。"
-        "不要把搜索词或函数调用示例当作实际搜索，也不要声称自己没有联网工具。"
-        if web_search else
-        "本轮联网搜索已关闭，即使用户要求搜索，也不能调用 search_web。"
-        "可以根据已有知识或已提供的资料回答，但要说明本轮没有联网核实。"
+        f"本轮最多处理 {MAX_TOOL_CALLS} 次工具请求。"
+        "达到限制后，只能总结已经获得的结果，"
+        "明确说明哪些部分尚未完成，不得编造结果或下载链接。"
     )
 
-    # 每个用户问题最多请求模型五次，避免无限循环。
+    # 最多请求模型 12 轮；达到工具上限时提前进入总结。
     for step in range(12):
-        # 最后一次只允许总结已有结果，不再发起新工具调用。
-        tool_choice = "none" if step == 11 else "auto"
+        tool_choice = (
+            "none"
+            if step == 11 or len(tool_steps) >= MAX_TOOL_CALLS
+            else "auto"
+        )
         message = request_stream_message(
             client,
             messages,
@@ -162,12 +165,22 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True):
                     "type": "tool_start",
                     "name": call.function.name,
                 })
-
-            # 即使模型提出未启用的搜索请求，后端也不执行。
-            if call.function.name == "search_web" and not web_search:
+            # 被次数或权限限制拒绝时，没有实际执行耗时。
+            duration_ms = None
+            # 同一轮可能包含多个工具请求，因此执行前仍需逐个检查。
+            if len(tool_steps) >= MAX_TOOL_CALLS:
+                result = {
+                    "error": f"已达到本轮 {MAX_TOOL_CALLS} 次工具请求上限，本次未执行。",
+                    "code": "tool_limit_reached",
+                    "executed": False,
+                }
+            elif call.function.name == "search_web" and not web_search:
                 result = {"error": "本轮未开启联网搜索"}
             else:
+                # 仅计量工具执行，不包含模型生成和记录保存的时间。
+                started_at = perf_counter()
                 result = execute_tool(call, conversation_id)
+                duration_ms = round((perf_counter() - started_at) * 1000, 2)
 
             # 执行后发送事件，将实际结果交给网页。
             if on_event:
@@ -175,6 +188,7 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True):
                     "type": "tool_end",
                     "name": call.function.name,
                     "result": result,
+                    "duration_ms": duration_ms,
                 })
 
             result_text = json.dumps(result, ensure_ascii=False)
@@ -184,13 +198,16 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True):
                 "name": call.function.name,
                 "arguments": call.function.arguments,
                 "result": result,
+                "duration_ms": duration_ms,
             })
 
-            # 同步追加到当前会话的 Markdown 文件。
+            # Markdown 同样保留耗时；未执行不能记为执行成功。
+            duration_text = "未执行" if duration_ms is None else f"{duration_ms} ms"
             append_record(
                 conversation_id,
                 f"工具调用｜{call.function.name}",
-                f"参数：{call.function.arguments}\n\n结果：{result_text}",
+                f"参数：{call.function.arguments}\n\n"
+                f"耗时：{duration_text}\n\n结果：{result_text}",
             )
 
             # 将执行结果交回模型，供它规划下一步或生成回答。

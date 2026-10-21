@@ -45,20 +45,37 @@ def search_web(query):
             payload = response.json()
 
         # 智谱原始结果名为 search_result，网页地址字段为 link。
+        # JSON 解析成功不代表结构正确，先检查对象类型再读取字段。
+        if not isinstance(payload, dict):
+            return {"error": "智谱没有返回预期的搜索结果对象"}
         results = payload.get("search_result")
         if not isinstance(results, list):
             return {"error": "智谱没有返回预期的搜索结果列表"}
 
         sources = []
         for item in results[:5]:
-            url = item.get("link") or ""
-            if urlparse(url).scheme not in {"http", "https"}:
+            # 跳过异常条目，避免一条坏数据中断本次全部搜索结果。
+            if not isinstance(item, dict):
                 continue
+            url = item.get("link") or ""
+            if not isinstance(url, str):
+                continue
+            try:
+                parsed = urlparse(url)
+            except ValueError:
+                continue
+            if (parsed.scheme not in {"http", "https"} or not parsed.netloc
+                    or parsed.username or parsed.password):
+                continue
+            # 文本字段可能缺失或类型异常，使用安全默认值而不强行切片。
+            title = item.get("title")
+            snippet = item.get("content")
+            published_date = item.get("publish_date")
             sources.append({
-                "title": (item.get("title") or "未命名网页")[:200],
+                "title": title[:200] if isinstance(title, str) and title else "未命名网页",
                 "url": url,
-                "snippet": (item.get("content") or "")[:2000],
-                "published_date": item.get("publish_date"),
+                "snippet": snippet[:2000] if isinstance(snippet, str) else "",
+                "published_date": published_date if isinstance(published_date, str) else None,
             })
         return {"provider": "zhipu", "query": query.strip(), "sources": sources}
     except httpx.HTTPStatusError as error:

@@ -8,7 +8,7 @@ from threading import Thread, Event, Lock
 from fastapi.responses import StreamingResponse
 from fastapi import FastAPI,HTTPException,UploadFile, File
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 from uuid import UUID, uuid4
 from chat_records import append_record,RECORDS
@@ -84,6 +84,14 @@ client = OpenAI(
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=10000)
+
+    # 后端独立拒绝纯空白消息，正常内容保持原样，避免破坏 Markdown 缩进。
+    @field_validator("content")
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("消息内容不能为空白")
+        return value
 
 
 class ChatRequest(BaseModel):

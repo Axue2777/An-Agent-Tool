@@ -127,7 +127,23 @@ button svg {
 .icon-button {
   font-size: 24px;
 }
-
+/* 搜索框不参与历史列表滚动，颜色复用已有变量。 */
+.history-search {
+  flex-shrink: 0;
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+}
+.history-empty {
+  padding: 8px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
 .history {
   flex: 1;
   min-height: 0;
@@ -373,6 +389,17 @@ button svg {
   text-underline-offset: 3px;
 }
 
+/* 来源列表不使用卡片；长标题和域名自动换行。 */
+.search-sources {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.search-sources ul { margin: 8px 0 0; padding-left: 20px; }
+.search-sources li { margin-bottom: 10px; overflow-wrap: anywhere; }
+.search-sources a { color: #24638e; text-underline-offset: 3px; }
+.search-sources small { display: block; color: var(--text-muted); }
+
 .tool-details {
   min-width: 0;
   margin-top: 12px;
@@ -574,3 +601,15 @@ button svg {
     padding: 12px;
   }
 }
+
+/* 简洁的进度列表，长名称允许换行，不使用额外卡片。 */
+.live-tool-list { margin: 12px 0; padding: 0; list-style: none; }
+.live-tool-list li {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 6px 0; color: var(--text-muted); overflow-wrap: anywhere;
+}
+.live-tool-list li > span { min-width: 0; }
+.live-tool-list .tool-failed { color: var(--danger); }
+
+/* 耗时作为次要信息，不抢工具名称的视觉重点。 */
+.tool-duration { color: var(--text-muted); font-size: 12px; }

@@ -14,6 +14,16 @@ const error = ref('')
 const conversationId = ref(null)
 // 列表从后端读取，不再读取浏览器中的完整聊天内容。
 const savedChats = ref([])
+// 搜索只改变展示列表，不修改原始聊天记录。
+const historyQuery = ref('')
+
+const filteredChats = computed(() => {
+  const keyword = historyQuery.value.trim().toLowerCase()
+  if (!keyword) return savedChats.value
+  return savedChats.value.filter(chat =>
+    (chat.title || '').toLowerCase().includes(keyword),
+  )
+})
 const sidebarOpen = ref(true)
 const menuChatId = ref(null)
 const progress = ref('')
@@ -29,7 +39,8 @@ const currentChatTitle = computed(() => {
   const chat = savedChats.value.find(item => item.id === conversationId.value)
   return chat?.title || 'Agent 聊天'
 })
-
+// 仅展示本轮实时进度，最终执行记录仍由后端保存。
+const liveToolSteps = ref([])
 // 记录哪条消息刚复制成功，以及恢复图标的定时器。
 const copiedMessage = ref(null)
 let copyTimer = null
@@ -156,15 +167,70 @@ async function loadHistory() {
   putSelectedFirst()
 }
 
+// 从搜索工具结果中提取链接，并去重、过滤非 HTTP 地址。
+function searchSources(message) {
+  const sources = new Map()
+  for (const step of message.tool_steps || []) {
+    if (step.name !== 'search_web') continue
+    const items = Array.isArray(step.result?.sources)
+      ? step.result.sources : []
+    for (const item of items) {
+      try {
+        const url = new URL(item.url)
+        if (!['http:', 'https:'].includes(url.protocol)) continue
+        if (url.username || url.password) continue
+        if (!sources.has(url.href)) {
+          sources.set(url.href, {
+            url: url.href,
+            title: item.title || url.hostname,
+            domain: url.hostname,
+          })
+        }
+      } catch {
+        // 地址格式不合法时跳过，不影响其他来源。
+      }
+    }
+  }
+  return [...sources.values()]
+}
+
+// 每段聊天使用独立的存储键，避免草稿混到其他聊天。
+function saveDraft(id, text) {
+  if (!id) return
+  try {
+    const key = `agent-draft:${id}`
+    if (text) localStorage.setItem(key, text)
+    else localStorage.removeItem(key)
+  } catch {
+    error.value = '草稿保存失败，请检查浏览器存储空间或权限。'
+  }
+}
+
+// 没有草稿时返回空字符串；读取失败不阻止打开聊天。
+function readDraft(id) {
+  try {
+    return localStorage.getItem(`agent-draft:${id}`) || ''
+  } catch {
+    error.value = '草稿读取失败，聊天记录不受影响。'
+    return ''
+  }
+}
+
+// 输入变化时立即保存；清空输入框时同时删除草稿。
+watch(input, text => {
+  saveDraft(conversationId.value, text)
+}, { flush: 'sync' })
+
 // 把后端返回的会话详情应用到聊天区域。
 function applyChat(chat) {
   conversationId.value = chat.id
   messages.value = chat.messages.map(message => ({ ...message }))
-  input.value = ''
+  // 先清理旧错误，再读取当前会话的草稿。
+  error.value = ''
+  input.value = readDraft(chat.id)
   streamingText.value = ''
   followLatest.value = true
   menuChatId.value = null
-  error.value = ''
   putSelectedFirst()
   rememberSelectedChat()
 }
@@ -179,6 +245,8 @@ async function newChat() {
     const chat = await requestJson('/chat/history', { method: 'POST' })
     const { messages: unusedMessages, ...metadata } = chat
     savedChats.value = [metadata, ...savedChats.value]
+    // 创建成功后清空旧筛选，确保新会话在左侧可见并显示选中背景。
+    historyQuery.value = ''
     applyChat(chat)
     return true
   } catch (err) {
@@ -240,6 +308,8 @@ async function deleteChat(chat) {
     await requestJson(`/chat/history/${encodeURIComponent(chat.id)}`, {
       method: 'DELETE',
     })
+    // 后端删除成功后，才清除这段聊天的本地草稿。
+    saveDraft(chat.id, '')
     savedChats.value = savedChats.value.filter(item => item.id !== chat.id)
     if (conversationId.value === chat.id) {
       conversationId.value = null
@@ -274,22 +344,22 @@ function handleComposerKeydown(event) {
 }
 
 
-// 通知后端取消任务，仍等待事件流返回最终状态。
+// 这里只请求停止，任务是否结束由后端事件流确认。
 async function stopGeneration() {
   const id = activeTaskId.value
   if (!id || stopping.value) return
   stopping.value = true
+
   try {
     await requestJson(`/chat/tasks/${id}/cancel`, { method: 'POST' })
+    // 请求被接受不等于任务已结束，此处不解除 loading。
   } catch (err) {
+    // 只更新原任务，避免迟到的响应影响下一轮任务。
     if (activeTaskId.value === id) {
       stopping.value = false
       error.value = `停止失败：${err.message}`
     }
   }
-  stopping.value=false
-  loading.value=false
-  activeTaskId.value=null
 }
 
 // 发送仍走流式接口；消息入库由后端负责，前端不要重复保存。
@@ -297,7 +367,8 @@ async function send() {
   const text = input.value.trim()
   if (!text || loading.value) return
   if (!conversationId.value && !(await newChat())) return
-
+  // 新问题开始时清除上一轮的临时进度。
+  liveToolSteps.value = []
   streamingText.value = ''
   followLatest.value = true
   messages.value.push({ role: 'user', content: text })
@@ -306,6 +377,8 @@ async function send() {
   progress.value = '正在连接 Agent…'
   error.value = ''
   activeTaskId.value = null
+  // 每轮请求独立，不沿用上一轮的停止状态。
+  stopping.value = false
 
   try {
     const response = await fetch('/chat/stream', {
@@ -359,10 +432,19 @@ async function send() {
         progress.value = '正在生成…'
       }
       if (event.type === 'tool_start') {
+        // 同名工具可以多次执行，因此每次开始都新增一项。
+        liveToolSteps.value.push({
+          name: event.name, label: name, status: '执行中',
+        })
         streamingText.value = ''
         progress.value = `正在${name}…`
       }
       if (event.type === 'tool_end') {
+        // 当前后端串行执行工具，找到对应的未完成项更新状态。
+        const step = liveToolSteps.value.find(
+          item => item.name === event.name && item.status === '执行中',
+        )
+        if (step) step.status = event.result?.error ? '失败' : '已完成'
         progress.value = event.result?.error
           ? `${name}未成功，正在处理…`
           : `${name}完成，正在处理下一步…`
@@ -385,14 +467,18 @@ async function send() {
   } catch (err) {
     error.value = err.message
   } finally {
+    // 成功、失败或取消，都在事件流处理结束后统一收尾。
+    activeTaskId.value = null
     stopping.value = false
-    // 列表刷新失败与聊天失败分开提示，也不自动重发用户消息。
+    progress.value = '正在刷新历史…'
+
     try {
       await loadHistory()
     } catch (err) {
       const warning = `历史列表刷新失败：${err.message}`
       error.value = error.value ? `${error.value}；${warning}` : warning
     }
+
     progress.value = ''
     loading.value = false
   }
@@ -486,8 +572,21 @@ onUnmounted(() => clearTimeout(copyTimer))
       >
         ＋ 新建聊天
       </button>
+      <!-- 搜索时关闭旧菜单，避免菜单残留在筛选结果中。 -->
+      <input
+        v-model="historyQuery"
+        class="history-search"
+        type="search"
+        aria-label="搜索聊天标题"
+        placeholder="搜索聊天标题"
+        @input="menuChatId = null"
+      />
       <nav class="history" aria-label="历史聊天">
-        <div v-for="chat in savedChats" :key="chat.id" class="history-entry">
+        <!-- 区分没有聊天与没有匹配结果，不在加载期间显示。 -->
+        <p v-if="!loading && !filteredChats.length" class="history-empty">
+          {{ historyQuery.trim() ? '没有匹配的聊天' : '暂无聊天记录' }}
+        </p>
+        <div v-for="chat in filteredChats" :key="chat.id" class="history-entry">
           <!-- 当前会话添加 selected 类，显示选中背景。 -->
           <div
             class="history-row"
@@ -547,11 +646,28 @@ onUnmounted(() => clearTimeout(copyTimer))
           </div>
           <!-- 展示 Markdown 正文；原始消息仍用于接口请求和记录保存。 -->
           <div class="markdown-body" v-html="renderMarkdown(message.content)"></div>
+          <!-- 标题使用普通文本插值，外部链接在新标签页打开。 -->
+          <section v-if="searchSources(message).length"
+            class="search-sources" aria-label="搜索来源">
+            <strong>搜索来源</strong>
+            <ul>
+              <li v-for="source in searchSources(message)" :key="source.url">
+                <a :href="source.url" target="_blank" rel="noopener noreferrer">
+                  {{ source.title }}
+                </a>
+                <small>{{ source.domain }}</small>
+              </li>
+            </ul>
+          </section>
           <!-- 有工具调用时显示可展开的执行记录。 -->
           <details v-if="message.tool_steps?.length" class="tool-details">
             <summary>执行记录 · {{ message.tool_steps.length }} 次工具调用</summary>
             <section v-for="(step, index) in message.tool_steps" :key="index">
               <strong>{{ step.name }}</strong>
+              <!-- 兼容旧记录：缺少耗时字段时不显示，0 毫秒仍然显示。 -->
+              <small v-if="step.duration_ms != null" class="tool-duration">
+                · {{ step.duration_ms }} ms
+              </small>
               <p>参数：{{ step.arguments }}</p>
               <pre>{{ JSON.stringify(step.result, null, 2) }}</pre>
               <!-- 直接使用报告工具返回的地址，不依赖助手正文中的链接。 -->
@@ -573,6 +689,16 @@ onUnmounted(() => clearTimeout(copyTimer))
             v-html="renderMarkdown(streamingText)"
           ></div>
         </article>
+        <!-- 仅在当前任务执行期间展示，结束后使用原有执行记录。 -->
+        <ol v-if="loading && activeTaskId && liveToolSteps.length"
+          class="live-tool-list" aria-label="本轮工具进度">
+          <li v-for="(step, index) in liveToolSteps" :key="index">
+            <span>{{ step.label }}</span>
+            <span :class="{ 'tool-failed': step.status === '失败' }">
+              {{ stopping && step.status === '执行中' ? '等待停止确认' : step.status }}
+            </span>
+          </li>
+        </ol>
         <!-- 随后端事件更新状态；上传资料时使用默认提示。 -->
         <p v-if="loading" role="status">
           {{ stopping ? '正在停止生成…' : (progress || '正在上传并解析资料…') }}
@@ -627,7 +753,7 @@ onUnmounted(() => clearTimeout(copyTimer))
 
         <button v-if="activeTaskId" class="composer-action" type="button"
           :disabled="stopping" @click="stopGeneration">
-          停止
+          {{ stopping ? '停止中…' : '停止' }}
         </button>
         <button v-else class="composer-action" type="submit"
           :disabled="loading || !input.trim()">

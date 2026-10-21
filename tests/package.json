@@ -1,0 +1,10 @@
+{
+  "name": "agent-workspace-checks",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Isolated browser checks for the Agent workspace",
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}
+

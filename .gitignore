@@ -23,3 +23,5 @@ agent.db-shm
 # 个人 OCR 测试图片与运行日志。
 ocr_test.png
 *.log
+
+# 测试源码需要提交；运行产物由 tests/.gitignore 单独排除。

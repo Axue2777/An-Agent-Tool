@@ -52,6 +52,10 @@ def check_cancelled(stop_event):
     if stop_event is not None and stop_event.is_set():
         raise TaskCancelled("用户停止生成")
 
+# 只检查服务能否响应，不调用模型、不读取聊天记录。
+@app.get("/health", tags=["运行状态"])
+def health_check():
+    return {"status": "ok", "service": "agent-workspace"}
 
 # 前端点击停止后，调用此接口设置对应任务的停止信号。
 @app.post("/chat/tasks/{task_id}/cancel", tags=["AI操作"], status_code=202)

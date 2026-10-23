@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import json
+import argparse
 from urllib.request import build_opener, ProxyHandler
 from pathlib import Path
 from importlib.util import find_spec
@@ -50,6 +51,17 @@ def wait_until_ready(url, processes, timeout=45):
 
 def main():
     """检查本机配置并管理前后端进程；导入模块时不执行。"""
+
+    # 先解析参数，后面的启动逻辑才能使用 args。
+    parser = argparse.ArgumentParser(description="启动 Agent 开发环境")
+    parser.add_argument("--desktop", action="store_true", help="打开桌面窗口")
+    args = parser.parse_args()
+
+    electron_exe = ROOT / "node_modules/electron/dist/electron.exe"
+    if args.desktop and not electron_exe.is_file():
+        raise SystemExit("未安装 Electron，请在项目根目录安装。")
+
+    # 原有的依赖检查、配置检查和启动代码继续放在这里，不要删除。
     # 先检查后端依赖，避免缺包时直接出现长串报错。
     modules = (
         "fastapi", "uvicorn", "openai", "httpx", "pydantic",
@@ -108,6 +120,7 @@ def main():
     ]
 
     processes = []
+    desktop_process = None
     try:
         for command, directory in commands:
             # Windows 独立进程组，让主脚本统一负责退出清理。
@@ -121,13 +134,30 @@ def main():
         # 先确认后端，再通过前端代理确认整条请求链路。
         wait_until_ready(f"http://127.0.0.1:{backend_port}/health", processes)
         wait_until_ready(f"http://127.0.0.1:{frontend_port}/health", processes)
+                # 服务就绪后再打开窗口，并传入本次实际端口。
+        if args.desktop:
+            desktop_env = os.environ.copy()
+            desktop_env["AGENT_FRONTEND_URL"] = f"http://127.0.0.1:{frontend_port}"
+            desktop_env.pop("ELECTRON_RUN_AS_NODE", None)
+            desktop_process = subprocess.Popen(
+                [str(electron_exe), str(ROOT)],
+                cwd=ROOT, env=desktop_env,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+            processes.append(desktop_process)
         print(f"启动就绪：http://127.0.0.1:{frontend_port}")
         print("按 Ctrl+C 停止本次启动的前后端。")
 
         # 任意启动进程退出时，结束本次运行并清理另一个进程。
         while True:
-            if any(process.poll() is not None for process in processes):
-                raise RuntimeError("启动进程已退出，请查看上方日志。")
+            # 关闭桌面窗口属于正常退出，随后进入 finally 清理。
+            if desktop_process is not None and desktop_process.poll() is not None:
+                if desktop_process.returncode != 0:
+                    raise RuntimeError(f"桌面进程异常退出：{desktop_process.returncode}")
+                break
+            # 前后端意外退出时，仍按启动失败处理。
+            if any(p.poll() is not None for p in processes if p is not desktop_process):
+                raise RuntimeError("前后端进程已退出，请查看上方日志。")
             time.sleep(0.5)
 
     except KeyboardInterrupt:

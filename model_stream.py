@@ -2,7 +2,8 @@ from openai.types.chat import ChatCompletionMessage
 
 
 # 接收一轮模型流：实时发送正文，并拼出可继续处理的完整消息。
-def request_stream_message(client, messages, tools, tool_choice, on_event=None):
+def request_stream_message(client, messages, tools, tool_choice, on_event=None,
+                           *, model="deepseek-flash"):
     text_parts = []
     calls = {}
     finish_reason = None
@@ -13,7 +14,7 @@ def request_stream_message(client, messages, tools, tool_choice, on_event=None):
 
     # 使用上下文管理器，正常结束或异常时都关闭上游连接。
     with client.chat.completions.create(
-        model="deepseek-flash",
+        model=model,
         messages=messages,
         tools=tools,
         tool_choice=tool_choice,

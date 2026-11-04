@@ -8,8 +8,8 @@ from agent_tools import run_agent
 def tool_call(number):
     # 为每个模拟调用提供不同编号。
     return SimpleNamespace(id=f"call_{number}", function=SimpleNamespace(
-        name="get_stock",
-        arguments=json.dumps({"product_name": "机械键盘"}),
+        name="save_report",
+        arguments=json.dumps({"content": "# 测试报告"}),
     ))
 
 
@@ -27,7 +27,7 @@ class TestAgentToolLimit(unittest.TestCase):
             patch("agent_tools.request_stream_message",
                   side_effect=responses) as model,
             patch("agent_tools.execute_tool",
-                  return_value={"stock": 12}) as tool,
+                  return_value={"download_url": "/test/report.md"}) as tool,
             patch("agent_tools.append_record"),
         ):
             reply, steps = run_agent(None, [], None)

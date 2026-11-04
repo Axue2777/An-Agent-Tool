@@ -4,6 +4,7 @@ import uvicorn
 import traceback
 import json
 from queue import Queue, Empty
+from runtime_paths import ENV_PATH, RESOURCE_ROOT
 from threading import Thread, Event, Lock
 from fastapi.responses import StreamingResponse
 from fastapi import FastAPI,HTTPException,UploadFile, File
@@ -17,7 +18,9 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 from dotenv import load_dotenv
 from document_parser import parse_document
+from knowledge_store import add_document, add_inventory_csv, list_files, delete_file
 from starlette.concurrency import run_in_threadpool
+from fastapi.staticfiles import StaticFiles
 from database import (
     init_db,
     save_user_message,
@@ -29,9 +32,20 @@ from database import (
     delete_conversation,
     get_recent_messages,
 )
+from api_settings import (
+    router as settings_router,
+    load_settings,
+    require_chat,
+    model_name,
+    search_key,
+    create_chat_client,
+    describe_chat_error,
+)
 
 app = FastAPI()
 
+# 设置接口必须注册在末尾的静态页面挂载之前。
+app.include_router(settings_router)
 # 本地示例在应用导入时创建所需表，重新加载不会清空数据。
 init_db()
 
@@ -72,17 +86,8 @@ def cancel_chat_task(task_id: UUID):
 
 # 从 main.py 所在目录加载配置，不受终端所在位置影响。
 # 以项目 .env 配置为准，覆盖终端中可能残留的旧密钥。
-load_dotenv(
-    Path(__file__).resolve().parent / ".env",
-    override=True,
-)
-
-client = OpenAI(
-    api_key=os.environ["DEEPSEEK_API_KEY"],
-    base_url="https://api.deepseek.com",
-    http_client=httpx.Client(trust_env=False, timeout=30.0),
-    max_retries=0,
-)
+# 密钥配置属于用户数据，不作为前端资源提供。
+load_dotenv(ENV_PATH, override=True)
 
 
 class ChatMessage(BaseModel):
@@ -133,15 +138,21 @@ def export_chat(conversation_id: UUID):
         filename=f"chat-{conversation_id}.md",
     )
 
+# 创建聊天时允许用户设置标题和角色；旧客户端不传请求体仍可使用。
+class CreateChatRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=60)
+    persona: str = Field(default="", max_length=2000)
 # 限制重命名请求的标题长度。
 class RenameChatRequest(BaseModel):
     title: str = Field(min_length=1, max_length=60)
 
 
-# 新建会话，编号由后端生成，直接返回空会话详情。
+# 不传请求体时仍创建普通聊天；传入标题和角色时一起保存。
 @app.post("/chat/history", tags=["聊天历史"], status_code=201)
-def create_chat():
-    return create_conversation(uuid4())
+def create_chat(request: CreateChatRequest | None = None):
+    request = request or CreateChatRequest()
+    title = request.title.strip() if request.title else None
+    return create_conversation(uuid4(), title=title, persona=request.persona.strip())
 
 
 # 更新指定会话的标题。
@@ -164,13 +175,32 @@ def delete_chat(conversation_id: UUID):
 
 # 普通 HTTP 请求不传回调；事件流接口通过它接收进度。
 # 统一处理聊天、工具调用和 Markdown 记录，供两个接口复用。
-def process_chat(request: ChatRequest, on_event=None, stop_event=None):
+def process_chat(request: ChatRequest, on_event=None, stop_event=None, settings=None):
     if request.messages[-1].role != "user":
         raise HTTPException(status_code=422, detail="最后一条必须是用户消息")
+    # 一轮聊天使用同一份配置，生成中途保存设置不会混用不同的密钥。
+    config = settings if settings is not None else load_settings()
+    require_chat(config)
+    # 即使旧设置曾开启搜索，DeepSeek 会话也不能获得智谱搜索工具。
+    use_search = config.provider == "zhipu" and request.web_search and config.search_enabled
+    if use_search and not search_key(config):
+        raise HTTPException(422, "请在 API 设置中填写智谱密钥，或关闭联网搜索。")
     conversation_id = request.conversation_id or uuid4()
+    chat_info = get_conversation(conversation_id)
+    persona = chat_info["persona"] if chat_info else ""
     # 只追加本轮最新消息，不将浏览器提交的整段历史重复写库。
     save_user_message(conversation_id, request.messages[-1].content)
     append_record(conversation_id, "用户", request.messages[-1].content)
+    # 只记录服务、模型和密钥来源说明，绝不记录密钥正文。
+    search_note = "关闭"
+    if use_search:
+        search_note = "智谱，使用聊天密钥"
+    append_record(
+        conversation_id,
+        "API 使用说明",
+        f"聊天：{config.provider} / {model_name(config)}\n\n搜索权限：{search_note}。"
+        "是否实际调用搜索，以后续工具记录为准。",
+    )
     # 最新用户消息在上方已经入库，这里读取时自然包含本次问题。
     history = get_recent_messages(conversation_id)
     # 暂存当前轮文字，取消时只写入 Markdown，不作为完整回答入库。
@@ -190,12 +220,16 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None):
         if event_type != "checkpoint" and on_event:
             on_event(event)
     try:
-      # 接收最终回答和本轮执行步骤。
-        reply, tool_steps = run_agent(
-            client, history, conversation_id,
-            on_event=emit,
-            web_search=request.web_search,
-        )
+        # 每轮新建客户端，结束或报错时自动关闭，避免复用过期配置。
+        with create_chat_client(config) as current_client:
+            reply, tool_steps = run_agent(
+                current_client, history, conversation_id,
+                on_event=emit,
+                web_search=use_search,
+                model=model_name(config),
+                search_api_key=search_key(config) if use_search else "",
+                persona=persona,
+            )
         # 完整回答入库前，再检查一次是否收到停止请求。
         check_cancelled(stop_event)
     except Exception as error:
@@ -222,9 +256,11 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None):
             "错误",
             f"Agent 执行失败：{type(error).__name__}",
         )
+        # 供应商超时、限流等已知错误给出可操作提示；未知内部错误仍不暴露细节。
+        detail = describe_chat_error(error, config)
         raise HTTPException(
-            status_code=502,
-            detail="Agent 执行失败，请查看后端终端",
+            status_code=429 if getattr(error, "status_code", None) == 429 else 502,
+            detail=detail or "Agent 执行失败，请查看后端终端",
         ) from error
     # Agent 已成功返回，再保存完整回答和工具步骤。
     save_assistant_message(conversation_id, reply, tool_steps)
@@ -253,6 +289,51 @@ if __name__ == "__main__":
     # 开发时监视项目文件，保存后自动重载，避免继续运行旧版工具代码。
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 
+# 资料库与普通附件分开：资料库可被当前聊天的 Agent 主动检索。
+@app.post("/chat/history/{conversation_id}/knowledge", status_code=201)
+async def upload_knowledge(conversation_id: UUID, file: UploadFile = File(...)):
+    if get_conversation(conversation_id) is None:
+        raise HTTPException(404, "聊天不存在")
+    filename = " ".join((file.filename or "资料").split())[:120]
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".txt", ".md", ".pdf", ".docx", ".csv"}:
+        raise HTTPException(400, "资料库只支持 txt、md、pdf、docx、csv")
+    try:
+        content = await file.read(10 * 1024 * 1024 + 1)
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(413, "资料不能超过 10 MB")
+        try:
+            if suffix == ".csv":
+                result = await run_in_threadpool(add_inventory_csv, conversation_id, filename, content)
+            else:
+                text = await run_in_threadpool(parse_document, content, suffix)
+                result = await run_in_threadpool(add_document, conversation_id, filename, text)
+            append_record(conversation_id, "资料库上传",
+                          f"名称：{filename}\n\n类型：{result['kind']}\n\n编号：{result['id']}")
+            return result
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
+        except Exception:
+            raise HTTPException(400, "资料解析或保存失败") from None
+    finally:
+        await file.close()
+
+
+@app.get("/chat/history/{conversation_id}/knowledge")
+def knowledge_list(conversation_id: UUID):
+    if get_conversation(conversation_id) is None:
+        raise HTTPException(404, "聊天不存在")
+    return {"files": list_files(conversation_id)}
+
+
+@app.delete("/chat/history/{conversation_id}/knowledge/{file_id}")
+def knowledge_delete(conversation_id: UUID, file_id: UUID):
+    if not delete_file(conversation_id, file_id):
+        raise HTTPException(404, "资料不存在")
+    append_record(conversation_id, "资料库删除", f"编号：{file_id}")
+    return {"deleted": True}
+
+
 # 接收当前聊天的文本附件，限制格式、大小和编码。
 @app.post("/chat/upload/{conversation_id}",tags=["AI操作"])
 async def upload_file(
@@ -276,8 +357,8 @@ async def upload_file(
             text = await run_in_threadpool(parse_document, content, suffix)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error))
-        except Exception:
-            traceback.print_exc()
+        except Exception as error:
+            print(f"Agent 执行失败：{type(error).__name__}")
             raise HTTPException(status_code=400, detail="解析失败，请检查文件是否完整")
         if not text.strip():
             raise HTTPException(status_code=400, detail="没有提取到可用文字")
@@ -303,6 +384,10 @@ async def upload_file(
 # 用事件流返回进度；最终结果仍包含回答、会话编号和执行记录。
 @app.post("/chat/stream", tags=["AI操作"])
 def stream_chat(request: ChatRequest):
+    config = load_settings()
+    require_chat(config)
+    if config.provider == "zhipu" and request.web_search and config.search_enabled and not search_key(config):
+        raise HTTPException(422, "请在 API 设置中填写智谱密钥，或关闭联网搜索。")
     events = Queue()
     task_id = str(uuid4())
     stop_event = Event()
@@ -314,11 +399,15 @@ def stream_chat(request: ChatRequest):
                 request,
                 on_event=events.put,
                 stop_event=stop_event,
+                settings=config,
             )
             events.put({"type": "done", "data": result})
         except TaskCancelled:
             events.put({"type": "cancelled", "task_id": task_id})
+        except HTTPException as error:
+            events.put({"type": "error", "message": str(error.detail)})
         except Exception:
+            traceback.print_exc()
             events.put({"type": "error", "message": "任务失败，请查看后端终端"})
         finally:
             with task_lock:
@@ -352,4 +441,15 @@ def stream_chat(request: ChatRequest):
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+# 只公开前端构建目录，不公开项目源码、密钥或聊天记录。
+frontend_dist = RESOURCE_ROOT / "fronted" / "dist"
+
+if (frontend_dist / "index.html").is_file():
+    # 必须放在所有 API 路由之后，避免根路径挂载挡住聊天接口。
+    app.mount(
+        "/",
+        StaticFiles(directory=frontend_dist, html=True),
+        name="frontend",
     )

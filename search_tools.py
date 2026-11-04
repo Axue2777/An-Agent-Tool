@@ -20,12 +20,13 @@ SEARCH_TOOL = {
 
 
 # 请求独立搜索接口，再把供应商字段转换成 Agent 使用的统一结果。
-def search_web(query):
+def search_web(query, api_key=None):
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise ValueError("搜索词必须是 1 至 500 字符的非空字符串")
-    key = os.environ.get("ZHIPU_API_KEY")
+    # None 兼容旧的独立调用；明确传空字符串时不能偷偷回退到旧密钥。
+    key = api_key if api_key is not None else os.environ.get("ZHIPU_API_KEY")
     if not key:
-        return {"error": "后端未配置 ZHIPU_API_KEY，无法联网搜索"}
+        return {"error": "未配置搜索密钥，请打开 API 设置。"}
 
     try:
         # 延续项目的直连设置，保留 HTTPS 证书验证并设置超时。

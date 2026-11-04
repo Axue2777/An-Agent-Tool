@@ -29,12 +29,13 @@ class TestSearchPermissions(unittest.TestCase):
         return steps, model, tool
 
     def test_disabled_hides_search(self):
-        # 关闭联网后，传给模型的工具列表不包含搜索，但保留库存。
+        # 关闭联网后，传给模型的工具列表不包含搜索，但保留附件和报告工具。
         _, model, tool = self.run_case(False)
         names = {item["function"]["name"]
                  for item in model.call_args.args[2]}
         self.assertNotIn("search_web", names)
-        self.assertIn("get_stock", names)
+        self.assertIn("read_attachment", names)
+        self.assertIn("save_report", names)
         tool.assert_not_called()
 
     def test_disabled_rejects_search(self):

@@ -24,4 +24,8 @@ agent.db-shm
 ocr_test.png
 *.log
 
+/build/
+/dist/
 # 测试源码需要提交；运行产物由 tests/.gitignore 单独排除。
+
+/release/

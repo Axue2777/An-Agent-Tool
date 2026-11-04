@@ -37,15 +37,15 @@ class TestModelStream(unittest.TestCase):
 
     def test_fragmented_and_interleaved_calls_keep_ids_and_order(self):
         client, _ = self.prepare([
-            chunk(tools=[tool_part(1, "call_b", "get_", '{"product_')]),
+            chunk(tools=[tool_part(1, "call_b", "save_", '{"cont')]),
             chunk(tools=[tool_part(0, "call_a", "search_web", '{"query":"Vue"}')]),
-            chunk(tools=[tool_part(1, name="stock", arguments='name":"机械键盘"}')]),
+            chunk(tools=[tool_part(1, name="report", arguments='ent":"测试报告"}')]),
             chunk(finish="tool_calls"),
         ])
         result = request_stream_message(client, [], [], "auto")
         self.assertEqual([c.id for c in result.tool_calls], ["call_a", "call_b"])
-        self.assertEqual(result.tool_calls[1].function.name, "get_stock")
-        self.assertEqual(result.tool_calls[1].function.arguments, '{"product_name":"机械键盘"}')
+        self.assertEqual(result.tool_calls[1].function.name, "save_report")
+        self.assertEqual(result.tool_calls[1].function.arguments, '{"content":"测试报告"}')
 
     def test_missing_or_truncated_finish_is_error(self):
         for finish in (None, "length", "content_filter"):

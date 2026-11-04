@@ -1,0 +1,38 @@
+appId: com.agentworkspace.desktop
+productName: AgentWorkspace
+asar: true
+
+# 与 Python 的 dist 分开，避免输出覆盖后端打包产物。
+directories:
+  output: release
+
+# 只收集桌面入口代码，不把整个项目复制进去。
+files:
+  - "electron/**/*.cjs"
+  - "package.json"
+
+# 后端必须放在压缩归档外，并保留整个目录结构。
+extraResources:
+  - from: "dist/agent-backend"
+    to: "backend"
+    filter:
+      - "**/*"
+      - "!**/.env*"
+      - "!**/agent.db*"
+      - "!**/records/**"
+
+win:
+  target: nsis
+
+nsis:
+  # 使用安装向导，并允许选择安装目录。
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+  # 创建桌面和开始菜单快捷方式。
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+  # 明确安装包名称。
+  artifactName: "AgentWorkspace-Setup-${version}.${ext}"

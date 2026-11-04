@@ -2,15 +2,15 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from runtime_paths import DB_PATH
 
-# 数据库固定放在后端目录，不受终端工作路径影响。
-DB_PATH = Path(__file__).resolve().parent / "agent.db"
 
 
 # 每次操作使用独立连接，适配目前线程执行的聊天任务。
 @contextmanager
 def connect_db():
+    # 首次运行时先创建用户数据目录，SQLite 再创建数据库。
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -48,7 +48,41 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_messages_conversation
             ON messages(conversation_id, id);
+            CREATE TABLE IF NOT EXISTS knowledge_files (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('document', 'inventory')),
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                FOREIGN KEY (file_id) REFERENCES knowledge_files(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_chat ON knowledge_files(conversation_id);
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                conversation_id TEXT NOT NULL,
+                product_name TEXT NOT NULL,
+                stock INTEGER NOT NULL CHECK (stock >= 0),
+                file_id TEXT NOT NULL,
+                PRIMARY KEY (conversation_id, product_name),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (file_id) REFERENCES knowledge_files(id) ON DELETE CASCADE
+            );
         """)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(conversations)")}
+        if "persona" not in columns:
+            db.execute(
+                "ALTER TABLE conversations ADD COLUMN persona TEXT NOT NULL DEFAULT ''"
+            )
+        if "title_locked" not in columns:
+            db.execute(
+                "ALTER TABLE conversations ADD COLUMN title_locked INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 # 收到问题就保存：创建或更新会话，并追加最新用户消息。
@@ -63,7 +97,7 @@ def save_user_message(conversation_id, content):
             VALUES (?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = CASE
-                    WHEN conversations.title = '新建聊天'
+                    WHEN conversations.title_locked = 0
                     AND NOT EXISTS (
                         SELECT 1 FROM messages
                         WHERE conversation_id = excluded.id AND role = 'user'
@@ -137,13 +171,22 @@ def get_conversation(conversation_id):
 # - 工具步骤使用 JSON 保留原始结构，恢复后仍能用于执行记录和下载链接。
 
 # 创建空会话，让“新建聊天”无需等到发送消息才保存。
-def create_conversation(conversation_id):
+def create_conversation(conversation_id, title=None, persona=""):
     timestamp = now()
+    custom_title = title.strip() if title else ""
+    display_title = custom_title or "新建聊天"
+    title_locked = 1 if custom_title else 0
+
     with connect_db() as db:
         db.execute("""
-            INSERT INTO conversations(id, title, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-        """, (str(conversation_id), "新建聊天", timestamp, timestamp))
+            INSERT INTO conversations(
+                id, title, persona, title_locked, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(conversation_id), display_title, persona.strip(),
+            title_locked, timestamp, timestamp,
+        ))
     return get_conversation(conversation_id)
 
 
@@ -151,7 +194,7 @@ def create_conversation(conversation_id):
 def rename_conversation(conversation_id, title):
     with connect_db() as db:
         cursor = db.execute("""
-            UPDATE conversations SET title = ?, updated_at = ?
+            UPDATE conversations SET title = ?, title_locked = 1, updated_at = ?
             WHERE id = ?
         """, (title, now(), str(conversation_id)))
         return cursor.rowcount > 0

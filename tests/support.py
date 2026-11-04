@@ -8,7 +8,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
-
+import api_settings
 import chat_records
 import database
 import file_tools
@@ -48,6 +48,15 @@ class SandboxCase(unittest.TestCase):
 class AppCase(SandboxCase):
     def setUp(self):
         super().setUp()
+        # 使用虚拟配置；任何测试请求都不读取 Windows 的真实凭据。
+        fake_config = api_settings.Settings(
+            deepseek_key="test-only-key", zhipu_key="test-only-zhipu",
+            search_key="test-only-search", search_enabled=True,
+        )
+        self.stack.enter_context(patch.object(
+            api_settings, "load_settings", return_value=fake_config,
+        ))
+        self.stack.enter_context(patch.object(api_settings, "create_chat_client"))
         # 导入 main 时先拦截环境加载、OpenAI 构造和数据库位置。
         name = f"_agent_checks_main_{uuid4().hex}"
         spec = importlib.util.spec_from_file_location(name, ROOT / "main.py")
@@ -59,8 +68,6 @@ class AppCase(SandboxCase):
             patch("openai.OpenAI") as constructor,
         ):
             spec.loader.exec_module(self.main)
-            # main 构造参数中的 HTTP 客户端没有发起请求，及时关闭资源。
-            constructor.call_args.kwargs["http_client"].close()
         self.agent = self.stack.enter_context(patch.object(
             self.main, "run_agent", return_value=("测试回答", []),
         ))

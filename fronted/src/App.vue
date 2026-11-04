@@ -1,15 +1,29 @@
 <script setup>
 import { ref, onMounted, computed, watch, nextTick, onUnmounted } from 'vue'
-import { Copy, Check, Square, Download } from '@lucide/vue'
+import NewChatSetup from './components/NewChatSetup.vue'
+import KnowledgePanel from './components/KnowledgePanel.vue'
+import ApiSettings from './components/ApiSettings.vue'
+import { Copy, Check, Square, Download, FolderOpen } from '@lucide/vue'
 import { marked } from 'marked'
 import { readChatStream } from './chat_stream'
 import DOMPurify from 'dompurify'
 
 const input = ref('')
+const showNewChatSetup = ref(false)
+const showKnowledgePanel = ref(false)
 const messages = ref([])
 const loading = ref(false)
 // 控制下一次发送是否允许联网搜索。
 const webSearchEnabled = ref(true)
+
+// 后端总开关决定是否可用，原按钮控制本轮是否允许。
+const searchAvailable = ref(false)
+function applyApiSettings(settings) {
+  searchAvailable.value = settings.provider === 'zhipu'
+    && settings.search_enabled && settings.search_configured
+  webSearchEnabled.value = searchAvailable.value
+}
+
 const error = ref('')
 const conversationId = ref(null)
 // 列表从后端读取，不再读取浏览器中的完整聊天内容。
@@ -231,29 +245,61 @@ function applyChat(chat) {
   streamingText.value = ''
   followLatest.value = true
   menuChatId.value = null
+  showKnowledgePanel.value = false
   putSelectedFirst()
   rememberSelectedChat()
 }
 
 // 创建成功后才切换页面，失败时保留当前聊天。
-async function newChat() {
+async function newChat(settings = {}) {
   if (loading.value) return false
   loading.value = true
   error.value = ''
   progress.value = '正在新建聊天…'
   try {
-    const chat = await requestJson('/chat/history', { method: 'POST' })
+    const chat = await requestJson('/chat/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    })
     const { messages: unusedMessages, ...metadata } = chat
     savedChats.value = [metadata, ...savedChats.value]
     // 创建成功后清空旧筛选，确保新会话在左侧可见并显示选中背景。
     historyQuery.value = ''
     applyChat(chat)
-    return true
+    return chat
   } catch (err) {
     error.value = err.message
     return false
   } finally {
     progress.value = ''
+    loading.value = false
+  }
+}
+
+// 先创建会话取得编号，再把所选资料上传到该会话。
+async function createConfiguredChat({ title, persona, files }) {
+  const chat = await newChat({ title, persona })
+  if (!chat) return
+  showNewChatSetup.value = false
+  if (!files.length) return
+  loading.value = true
+  error.value = ''
+  try {
+    for (const file of files) {
+      const form = new FormData()
+      form.append('file', file)
+      const response = await fetch(`/chat/history/${chat.id}/knowledge`, {
+        method: 'POST', body: form,
+      })
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(`${file.name}：${detail.detail || response.status}`)
+      }
+    }
+  } catch (cause) {
+    error.value = `部分资料上传失败：${cause.message}。可在资料库中重试。`
+  } finally {
     loading.value = false
   }
 }
@@ -387,7 +433,7 @@ async function send() {
       body: JSON.stringify({
         // 只提交本次问题；过去的对话由后端从数据库读取。
       messages: [{ role: 'user', content: text }],
-        web_search: webSearchEnabled.value,
+        web_search: searchAvailable.value && webSearchEnabled.value,
         conversation_id: conversationId.value,
       }),
     })
@@ -397,10 +443,11 @@ async function send() {
 
     let completed = false
     const toolNames = {
-      get_stock: '查询库存',
       read_attachment: '读取附件',
       save_report: '生成报告',
       search_web: '联网搜索',
+      lookup_inventory: '查询资料库库存',
+      search_knowledge: '检索资料库',
     }
 
 
@@ -568,7 +615,7 @@ onUnmounted(() => clearTimeout(copyTimer))
       <button
         class="sidebar-item new-chat-button"
         :disabled="loading"
-        @click="newChat"
+        @click="showNewChatSetup = true"
       >
         ＋ 新建聊天
       </button>
@@ -618,6 +665,19 @@ onUnmounted(() => clearTimeout(copyTimer))
         <span class="current-chat-title" :title="currentChatTitle">
           {{ currentChatTitle }}
         </span>
+        <ApiSettings :busy="loading" @updated="applyApiSettings" />
+        <button type="button" class="icon-button" title="资料库" aria-label="资料库"
+          :disabled="loading || !conversationId" @click="showKnowledgePanel = true">
+          <FolderOpen :size="18" />
+        </button>
+        <NewChatSetup
+          v-if="showNewChatSetup"
+          :busy="loading"
+          @cancel="showNewChatSetup = false"
+          @create="createConfiguredChat"
+        />
+        <KnowledgePanel v-if="showKnowledgePanel && conversationId"
+          :conversation-id="conversationId" @close="showKnowledgePanel = false" />
         <!-- 生成期间禁止导出，避免下载到尚未写完的记录。 -->
         <button type="button" class="icon-button export-chat"
           :disabled="loading || exporting || !conversationId || !messages.length"
@@ -720,9 +780,9 @@ onUnmounted(() => clearTimeout(copyTimer))
           <button
             type="button"
             class="composer-tool search-tool"
-            :disabled="loading"
+            :disabled="loading || !searchAvailable"
             :aria-pressed="webSearchEnabled"
-            :title="webSearchEnabled ? '联网搜索已开启，点击关闭' : '联网搜索已关闭，点击开启'"
+            :title="!searchAvailable ? '当前模式不可联网搜索' : webSearchEnabled ? '联网搜索已开启，点击关闭' : '联网搜索已关闭，点击开启'"
             @click="webSearchEnabled = !webSearchEnabled"
           >
             联网搜索

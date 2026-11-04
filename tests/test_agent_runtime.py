@@ -6,9 +6,9 @@ from unittest.mock import patch
 import agent_tools
 
 
-def call(name="get_stock", args=None):
+def call(name="save_report", args=None):
     return N(id="call_test", function=N(name=name, arguments=json.dumps(
-        {"product_name": "机械键盘"} if args is None else args,
+        {"content": "# 测试报告"} if args is None else args,
     )))
 
 
@@ -19,8 +19,9 @@ class TestAgentRuntime(unittest.TestCase):
                 request = call()
                 request.function.arguments = arguments
                 self.assertIn("error", agent_tools.execute_tool(request, None))
-        for args in ({"product_name": 1}, {"product_name": "机械键盘", "extra": True}):
+        for args in ({"content": ""}, {"content": "报告", "extra": True}):
             self.assertIn("error", agent_tools.execute_tool(call(args=args), None))
+        self.assertIn("error", agent_tools.execute_tool(call("get_stock"), None))
 
     def test_plain_answer_does_not_execute_tools(self):
         with patch.object(agent_tools, "request_stream_message", return_value=N(content="回答", tool_calls=[])), patch.object(agent_tools, "execute_tool") as execute:
@@ -33,7 +34,7 @@ class TestAgentRuntime(unittest.TestCase):
         responses = [N(content=None, tool_calls=[call()]), N(content="回答", tool_calls=[])]
         with (
             patch.object(agent_tools, "request_stream_message", side_effect=responses),
-            patch.object(agent_tools, "execute_tool", return_value={"stock": 12}),
+            patch.object(agent_tools, "execute_tool", return_value={"download_url": "/test/report.md"}),
             patch.object(agent_tools, "append_record") as record,
             patch.object(agent_tools, "perf_counter", side_effect=[10, 10.125]),
         ):
@@ -55,7 +56,7 @@ class TestAgentRuntime(unittest.TestCase):
         with (
             patch.object(agent_tools, "MAX_TOOL_CALLS", 100),
             patch.object(agent_tools, "request_stream_message", side_effect=lambda *a, **k: N(content=None, tool_calls=[call()])) as model,
-            patch.object(agent_tools, "execute_tool", return_value={"stock": 12}) as execute,
+            patch.object(agent_tools, "execute_tool", return_value={"download_url": "/test/report.md"}) as execute,
             patch.object(agent_tools, "append_record"),
         ):
             with self.assertRaises(RuntimeError):

@@ -9,7 +9,7 @@ const root = path.resolve(__dirname, '..')
 const artifacts = path.join(__dirname, '_artifacts')
 const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
-let chats, mode, requests, pending, server, browser
+let chats, mode, settingsProvider, requests, pending, server, browser
 const checks = []
 const runtimeErrors = []
 const body = '# Vue 学习\n\n**重点内容**\n\n| 名称 | 说明 |\n| --- | --- |\n| computed | 缓存 |\n\n' +
@@ -26,9 +26,10 @@ function reset() {
         ],
       } }],
     }] }],
-    [B, { id: B, title: '库存查询', messages: [] }],
+    [B, { id: B, title: '报告草稿', messages: [] }],
   ])
   mode = 'normal'
+  settingsProvider = 'zhipu'
   requests = []
   pending = null
 }
@@ -47,13 +48,42 @@ function event(res, data) { res.write('data: ' + JSON.stringify(data) + '\n\n') 
 async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost')
   const parts = url.pathname.split('/').filter(Boolean)
+  if (url.pathname === '/chat/settings' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      revision: 'test-only', provider: settingsProvider,
+      deepseek_model: 'deepseek-flash', zhipu_model: 'glm-4.7-flash',
+      search_enabled: true, share_chat_key: settingsProvider === 'zhipu',
+      chat_configured: true, search_configured: true,
+      has_deepseek_key: true, has_zhipu_key: true, has_search_key: true,
+    }))
+    return
+  }
   if (url.pathname === '/chat/history') {
     if (req.method === 'POST') {
-      const chat = { id: randomUUID(), title: '新建聊天', messages: [] }
+      const settings = JSON.parse((await readBody(req)).toString() || '{}')
+      const chat = { id: randomUUID(), title: settings.title || '新建聊天',
+        persona: settings.persona || '', messages: [] }
       chats.set(chat.id, chat)
       return json(res, chat)
     }
     return json(res, { conversations: [...chats.values()].map(({ messages, ...chat }) => chat) })
+  }
+  if (parts[0] === 'chat' && parts[1] === 'history' && parts[3] === 'knowledge') {
+    const chat = chats.get(parts[2])
+    if (!chat) return json(res, { detail: '聊天不存在' }, 404)
+    chat.knowledge ||= []
+    if (req.method === 'POST' && parts.length === 4) {
+      await readBody(req)
+      const file = { id: randomUUID(), filename: 'stock.csv', kind: 'inventory' }
+      chat.knowledge.push(file)
+      return json(res, file, 201)
+    }
+    if (req.method === 'GET' && parts.length === 4) return json(res, { files: chat.knowledge })
+    if (req.method === 'DELETE' && parts.length === 5) {
+      chat.knowledge = chat.knowledge.filter(file => file.id !== parts[4])
+      return json(res, { deleted: true })
+    }
   }
   if (parts[0] === 'chat' && parts[1] === 'history') {
     const chat = chats.get(parts[2])
@@ -91,9 +121,9 @@ async function handle(req, res) {
       return
     }
     if (mode === 'tools') {
-      event(res, { type: 'tool_start', name: 'get_stock' })
+      event(res, { type: 'tool_start', name: 'save_report' })
       await new Promise(resolve => setTimeout(resolve, 500))
-      event(res, { type: 'tool_end', name: 'get_stock', result: { stock: 12 }, duration_ms: 100 })
+      event(res, { type: 'tool_end', name: 'save_report', result: { download_url: '/test/report.md' }, duration_ms: 100 })
       await new Promise(resolve => setTimeout(resolve, 500))
     }
     const reply = '测试回答：**已完成**'
@@ -124,8 +154,9 @@ async function check(name, fn) {
   try { await fn(); checks.push({ name, status: 'passed' }); console.log('PASS', name) }
   catch (error) { checks.push({ name, status: 'failed', error: error.message }); console.log('FAIL', name, error.message) }
 }
-async function pageFor(origin, viewport = { width: 1440, height: 900 }) {
+async function pageFor(origin, viewport = { width: 1440, height: 900 }, provider = 'zhipu') {
   reset()
+  settingsProvider = provider
   const context = await browser.newContext({ viewport, acceptDownloads: true })
   await context.addInitScript(({ id }) => {
     if (!localStorage.getItem('agent-selected-chat')) localStorage.setItem('agent-selected-chat', id)
@@ -146,8 +177,8 @@ async function pageFor(origin, viewport = { width: 1440, height: 900 }) {
 async function done(page) {
   await page.waitForFunction(() => !document.querySelector('.composer-editor').disabled)
 }
-async function fixture(origin, fn, viewport) {
-  const { page, context } = await pageFor(origin, viewport)
+async function fixture(origin, fn, viewport, provider) {
+  const { page, context } = await pageFor(origin, viewport, provider)
   try { await fn(page) } finally { await context.close(); if (pending) { pending.res.end(); pending = null } }
 }
 async function run() {
@@ -172,17 +203,17 @@ async function run() {
   await check('恢复选中聊天、标题同步、置顶高亮', () => fixture(origin, async page => {
     assert.equal(await page.locator('.current-chat-title').innerText(), 'Vue 学习')
     assert.equal(await page.locator('.history-row.selected').count(), 1)
-    await page.getByRole('button', { name: '库存查询', exact: true }).click()
+    await page.getByRole('button', { name: '报告草稿', exact: true }).click()
     await done(page)
-    assert.equal(await page.locator('.history-title').first().innerText(), '库存查询')
+    assert.equal(await page.locator('.history-title').first().innerText(), '报告草稿')
     await page.reload(); await done(page)
-    assert.equal(await page.locator('.current-chat-title').innerText(), '库存查询')
+    assert.equal(await page.locator('.current-chat-title').innerText(), '报告草稿')
   }))
   await check('各聊天草稿隔离、刷新恢复', () => fixture(origin, async page => {
     await page.getByRole('textbox', { name: '消息', exact: true }).fill('Vue 草稿')
-    await page.getByRole('button', { name: '库存查询', exact: true }).click(); await done(page)
+    await page.getByRole('button', { name: '报告草稿', exact: true }).click(); await done(page)
     assert.equal(await page.locator('.composer-editor').inputValue(), '')
-    await page.locator('.composer-editor').fill('库存草稿')
+    await page.locator('.composer-editor').fill('报告草稿内容')
     await page.getByRole('button', { name: 'Vue 学习', exact: true }).click(); await done(page)
     assert.equal(await page.locator('.composer-editor').inputValue(), 'Vue 草稿')
     await page.reload(); await done(page)
@@ -199,16 +230,35 @@ async function run() {
   }))
   await check('筛选期间新建聊天仍显示当前选中项', () => fixture(origin, async page => {
     await page.getByRole('searchbox').fill('Vue')
-    await page.getByRole('button', { name: '＋ 新建聊天', exact: true }).click(); await done(page)
+    await page.getByRole('button', { name: '＋ 新建聊天', exact: true }).click()
+    await page.getByRole('button', { name: '开始聊天', exact: true }).click(); await done(page)
     assert.equal(await page.locator('.history-row.selected').count(), 1, '新聊天被旧搜索条件隐藏')
   }))
   await check('新聊天首次提问自动命名并保持置顶', () => fixture(origin, async page => {
-    await page.getByRole('button', { name: '＋ 新建聊天', exact: true }).click(); await done(page)
+    await page.getByRole('button', { name: '＋ 新建聊天', exact: true }).click()
+    await page.getByRole('button', { name: '开始聊天', exact: true }).click(); await done(page)
     assert.equal(await page.locator('.current-chat-title').innerText(), '新建聊天')
     await page.locator('.composer-editor').fill('三天 Vue 学习计划')
     await page.getByRole('button', { name: '发送', exact: true }).click(); await done(page)
     assert.equal(await page.locator('.current-chat-title').innerText(), '三天 Vue 学习计划')
     assert.equal(await page.locator('.history-title').first().innerText(), '三天 Vue 学习计划')
+  }))
+  await check('自定义聊天名称和角色', () => fixture(origin, async page => {
+    await page.getByRole('button', { name: '＋ 新建聊天', exact: true }).click()
+    await page.getByLabel('聊天名称（可留空）').fill('店员助手')
+    await page.getByLabel('角色与个性').fill('只根据资料库回答库存')
+    await page.getByRole('button', { name: '开始聊天', exact: true }).click(); await done(page)
+    assert.equal(await page.locator('.current-chat-title').innerText(), '店员助手')
+    assert.equal(chats.get([...chats.keys()].at(-1)).persona, '只根据资料库回答库存')
+  }))
+  await check('新建聊天时上传资料并在资料库查看', () => fixture(origin, async page => {
+    await page.getByRole('button', { name: '＋ 新建聊天', exact: true }).click()
+    await page.getByLabel('资料库文件（可稍后上传）').setInputFiles({
+      name: 'stock.csv', mimeType: 'text/csv', buffer: Buffer.from('product_name,stock\nmouse,2\n'),
+    })
+    await page.getByRole('button', { name: '开始聊天', exact: true }).click(); await done(page)
+    await page.getByRole('button', { name: '资料库', exact: true }).click()
+    await page.getByText('stock.csv · 库存表').waitFor()
   }))
   await check('聊天重命名、删除与草稿清理', () => fixture(origin, async page => {
     await page.locator('.history-entry').first().hover()
@@ -237,6 +287,16 @@ async function run() {
     assert.equal(requests[0].messages.length, 1)
     await page.getByText('测试回答：', { exact: false }).last().waitFor()
   }))
+  await check('DeepSeek 模式不会发送联网搜索请求', async () => {
+    await fixture(origin, async page => {
+      const search = page.getByRole('button', { name: '联网搜索', exact: true })
+      await page.waitForFunction(() => document.querySelector('.search-tool')?.disabled)
+      assert.equal(await search.isDisabled(), true)
+      await page.locator('.composer-editor').fill('只用 DeepSeek')
+      await page.locator('.composer-editor').press('Enter'); await done(page)
+      assert.equal(requests.at(-1).web_search, false)
+    }, undefined, 'deepseek')
+  })
   await check('主动停止固定回复、结束后恢复发送', () => fixture(origin, async page => {
     mode = 'slow'
     await page.locator('.composer-editor').fill('长任务')
@@ -262,7 +322,7 @@ async function run() {
   }))
   await check('实时工具进度与结束清理', () => fixture(origin, async page => {
     mode = 'tools'
-    await page.locator('.composer-editor').fill('查库存')
+    await page.locator('.composer-editor').fill('生成报告')
     await page.getByRole('button', { name: '发送', exact: true }).click()
     await page.getByRole('list', { name: '本轮工具进度' }).getByText('执行中', { exact: true }).waitFor()
     await page.getByRole('list', { name: '本轮工具进度' }).getByText('已完成', { exact: true }).waitFor()

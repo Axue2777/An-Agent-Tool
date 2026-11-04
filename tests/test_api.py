@@ -80,6 +80,22 @@ class TestChatApi(AppCase):
         self.api.post("/chat", json=self.request(web_search=False))
         self.assertFalse(self.agent.call_args.kwargs["web_search"])
 
+    def test_legacy_deepseek_settings_never_call_search(self):
+        # 测试配置保留旧搜索开关，后端仍必须阻止混用智谱搜索。
+        self.api.post("/chat", json=self.request(web_search=True))
+        self.assertFalse(self.agent.call_args.kwargs["web_search"])
+        self.assertEqual(self.agent.call_args.kwargs["search_api_key"], "")
+
+    def test_zhipu_search_uses_its_chat_key(self):
+        from api_settings import Settings
+        config = Settings(provider="zhipu", zhipu_key="zhipu-only-key",
+                          search_enabled=True)
+        with patch.object(self.main, "load_settings", return_value=config):
+            response = self.api.post("/chat", json=self.request(web_search=True))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.agent.call_args.kwargs["web_search"])
+        self.assertEqual(self.agent.call_args.kwargs["search_api_key"], "zhipu-only-key")
+
 
 class TestHistoryApi(AppCase):
     def test_create_list_rename_detail_delete(self):

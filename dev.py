@@ -55,6 +55,7 @@ def main():
     # 先解析参数，后面的启动逻辑才能使用 args。
     parser = argparse.ArgumentParser(description="启动 Agent 开发环境")
     parser.add_argument("--desktop", action="store_true", help="打开桌面窗口")
+    parser.add_argument("--built", action="store_true", help="使用已构建的前端")
     args = parser.parse_args()
 
     electron_exe = ROOT / "node_modules/electron/dist/electron.exe"
@@ -72,12 +73,14 @@ def main():
     if missing:
         raise SystemExit(f"缺少后端依赖：{', '.join(missing)}")
 
-    # Node 用于运行 Vue；Vite 文件存在表示已安装前端工具。
-    if not shutil.which("node"):
-        raise SystemExit("未找到 Node.js，安装后请重新打开 VS Code。")
-    if not (ROOT / "fronted/node_modules/vite/bin/vite.js").is_file():
-        raise SystemExit("前端依赖未安装，请运行：npm.cmd ci --prefix fronted")
-
+    # 构建模式只需要静态页面；开发模式才检查 Node 和 Vite。
+    if args.built:
+        if not (ROOT / "fronted/dist/index.html").is_file():
+            raise SystemExit("前端尚未构建，请先运行 npm.cmd --prefix fronted run build")
+    elif not shutil.which("node") or not (
+        ROOT / "fronted/node_modules/vite/bin/vite.js"
+    ).is_file():
+        raise SystemExit("开发模式需要 Node.js 和前端依赖，请检查安装情况。")
     # 使用现有 dotenv 解析配置；与后端一致，文件配置优先。
     from dotenv import dotenv_values
 
@@ -86,38 +89,44 @@ def main():
         if value is not None:
             settings[name] = value
 
-    # 只检查是否填写，不打印密钥，也不请求收费接口。
-    if not (settings.get("DEEPSEEK_API_KEY") or "").strip():
-        raise SystemExit("未配置 DEEPSEEK_API_KEY，请填写并保存根目录 .env。")
-    if not (settings.get("ZHIPU_API_KEY") or "").strip():
-        print("提醒：未配置智谱密钥，联网搜索不可用，普通聊天不受影响。")
-
+    # 现在密钥可以由软件内设置提供，启动器不再强制要求 .env。
+    print("API 配置由软件内的设置面板管理；本次预检查不验证密钥和余额。")
 
 
 
     backend_port = find_available_port(8000)
-    frontend_port = find_available_port(5173, excluded=(backend_port,))
-
+    # 构建模式由同一个后端提供页面和 API，共用端口。
+    frontend_port = (
+        backend_port if args.built
+        else find_available_port(5173, excluded=(backend_port,))
+    )
     # 后续启动的 Vite 会继承这个变量，不需要手动修改代理端口。
     os.environ["AGENT_API_TARGET"] = f"http://127.0.0.1:{backend_port}"
+    # 设置接口只接受本次 Vite 页面来源；打包页面与后端同源，不需要额外来源。
+    if args.built:
+        os.environ.pop("AGENT_SETTINGS_ORIGIN", None)
+    else:
+        os.environ["AGENT_SETTINGS_ORIGIN"] = f"http://127.0.0.1:{frontend_port}"
 
     print(f"计划使用后端地址：http://127.0.0.1:{backend_port}")
     print(f"计划使用前端地址：http://127.0.0.1:{frontend_port}")
 
     # 用参数列表启动，项目路径包含中文或空格时也不需要手动拼接引号。
-    commands = [
-        (
-            [sys.executable, "-m", "uvicorn", "main:app",
-             "--host", "127.0.0.1", "--port", str(backend_port), "--reload"],
-            ROOT,
-        ),
-        (
+    backend_command = [
+        sys.executable, "-m", "uvicorn", "main:app",
+        "--host", "127.0.0.1", "--port", str(backend_port),
+    ]
+    # 构建模式不热重载，也不创建 Vite 进程。
+    if not args.built:
+        backend_command.append("--reload")
+    commands = [(backend_command, ROOT)]
+    if not args.built:
+        commands.append((
             [shutil.which("node"),
              str(ROOT / "fronted/node_modules/vite/bin/vite.js"),
              "--host", "127.0.0.1", "--port", str(frontend_port), "--strictPort"],
             ROOT / "fronted",
-        ),
-    ]
+        ))
 
     processes = []
     desktop_process = None
@@ -131,10 +140,12 @@ def main():
             )
             processes.append(process)
 
-        # 先确认后端，再通过前端代理确认整条请求链路。
+        # 所有模式都要等待后端就绪。
         wait_until_ready(f"http://127.0.0.1:{backend_port}/health", processes)
-        wait_until_ready(f"http://127.0.0.1:{frontend_port}/health", processes)
-                # 服务就绪后再打开窗口，并传入本次实际端口。
+
+        # 只有开发模式才需要检查 Vite 的代理。
+        if not args.built:
+            wait_until_ready(f"http://127.0.0.1:{frontend_port}/health", processes)                # 服务就绪后再打开窗口，并传入本次实际端口。
         if args.desktop:
             desktop_env = os.environ.copy()
             desktop_env["AGENT_FRONTEND_URL"] = f"http://127.0.0.1:{frontend_port}"

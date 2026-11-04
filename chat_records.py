@@ -1,10 +1,9 @@
 from datetime import datetime
-from pathlib import Path
+from runtime_paths import RECORDS
 from threading import Lock
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-RECORDS = Path(__file__).resolve().parent / "records"
 print("聊天记录保存位置：", RECORDS)
 lock = Lock()
 

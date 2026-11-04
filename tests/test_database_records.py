@@ -44,8 +44,8 @@ class TestDatabase(SandboxCase):
 
     def test_messages_and_tool_metadata_roundtrip(self):
         chat_id = uuid4()
-        steps = [{"name": "get_stock", "arguments": '{"商品":"键盘"}',
-                  "result": {"stock": 12}, "duration_ms": 0}]
+        steps = [{"name": "save_report", "arguments": '{"content":"报告"}',
+                  "result": {"download_url": "/test/report.md"}, "duration_ms": 0}]
         db.save_user_message(chat_id, "问题")
         db.save_assistant_message(chat_id, "**回答**", steps)
         messages = db.get_conversation(chat_id)["messages"]

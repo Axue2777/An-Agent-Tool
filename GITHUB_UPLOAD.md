@@ -1,6 +1,6 @@
 # 首次上传 GitHub
 
-本说明适用于当前 D:\Agent：尚未初始化 Git 仓库。命令在 VS Code 的 PowerShell 终端执行。以下是操作说明，不会自动上传任何文件。
+本说明记录首次创建 GitHub 仓库的流程。当前 D:\Agent 已有 Git 仓库和远程地址；更新现有仓库请直接看第 6 节。以下命令在 VS Code 的 PowerShell 终端执行，不会自动上传任何文件。
 
 ## 1. 在 GitHub 新建空仓库
 
@@ -84,9 +84,11 @@ HTTPS 推送可能弹出 GitHub 登录授权，按 Git 的凭据管理器或浏�
 ## 6. 后续更新
 
 ```powershell
-# 查看变化，再提交当前修改。
+# 查看变化；先暂存已跟踪文件，再按需暂存新源码。
 git status
-git add .
+git add -u
+# 新文件请逐个核对后用 git add 文件名 添加；不要把测试资料和构建产物一起暂存。
+git diff --cached --name-only
 git diff --cached --stat
 git commit -m "feat: describe the change"
 git push

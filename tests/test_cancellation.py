@@ -1,6 +1,7 @@
 """停止信号、部分回复记录和流式任务收尾测试。"""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from unittest.mock import patch
 from uuid import UUID, uuid4
 import database
 from tests.support import AppCase
@@ -77,6 +78,21 @@ class TestCancellation(AppCase):
         self.assertEqual([e["type"] for e in events], ["start", "error"])
         self.assertNotIn("private-internal", response.text)
         self.assertEqual(self.main.active_tasks, {})
+
+    def test_provider_busy_stream_returns_specific_message(self):
+        from api_settings import Settings
+
+        class Busy(Exception):
+            status_code = 429
+            body = {"error": {"code": "1305"}}
+
+        self.agent.side_effect = Busy()
+        config = Settings(provider="zhipu", zhipu_key="test-key")
+        with patch.object(self.main, "load_settings", return_value=config):
+            response = self.api.post("/chat/stream", json=self.request())
+        events = self.events(response)
+        self.assertEqual([event["type"] for event in events], ["start", "error"])
+        self.assertIn("繁忙（1305）", events[-1]["message"])
 
     def test_running_stream_can_be_cancelled_and_next_request_works(self):
         entered, release = Event(), Event()

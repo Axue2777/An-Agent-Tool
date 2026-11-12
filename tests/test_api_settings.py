@@ -12,14 +12,17 @@ import api_settings as settings
 
 
 class MemoryVault:
-    def __init__(self):
-        self.value = None
+    def __init__(self, values=None):
+        self.values = dict(values or {})
 
     def get_password(self, service, username):
-        return self.value
+        return self.values.get((service, username))
 
     def set_password(self, service, username, value):
-        self.value = value
+        self.values[(service, username)] = value
+
+    def delete_password(self, service, username):
+        del self.values[(service, username)]
 
 
 class TestApiSettings(unittest.TestCase):
@@ -69,7 +72,50 @@ class TestApiSettings(unittest.TestCase):
     def test_deepseek_cannot_enable_search(self):
         response = self.save(search_enabled=True)
         self.assertEqual(response.status_code, 422)
-        self.assertIsNone(self.vault.value)
+        self.assertEqual(self.vault.values, {})
+
+    def test_multiple_providers_and_keys_survive_fresh_vault_instance(self):
+        response = self.save(
+            provider="gemini", gemini_model="gemini-3.8-flash",
+            gemini_key="gemini-secret", qwen_key="qwen-secret",
+            openai_key="openai-secret", custom_key="custom-secret",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("gemini-secret", response.text)
+        reopened_vault = MemoryVault(self.vault.values)
+        with patch.object(settings, "_vault", return_value=reopened_vault):
+            reopened = settings.load_settings()
+            self.assertEqual(reopened.provider, "gemini")
+            self.assertEqual(settings.chat_key(reopened), "gemini-secret")
+            self.assertEqual(reopened.qwen_key.get_secret_value(), "qwen-secret")
+            self.assertEqual(reopened.openai_key.get_secret_value(), "openai-secret")
+            self.assertTrue(settings.public_settings(reopened)["chat_configured"])
+
+    def test_legacy_credential_migrates_without_losing_keys(self):
+        old = settings.Settings(provider="zhipu", zhipu_key="old-zhipu",
+                                deepseek_key="old-deepseek", search_enabled=True)
+        self.vault.set_password(settings._legacy_service(), "api-settings",
+                                json.dumps(settings._raw(old)))
+        migrated = settings.load_settings()
+        self.assertEqual(settings.chat_key(migrated), "old-zhipu")
+        self.assertEqual(self.vault.get_password(settings._service(), "zhipu_key"), "old-zhipu")
+        self.assertEqual(self.vault.get_password(settings._service(), "settings") is not None, True)
+        self.vault.delete_password(settings._legacy_service(), "api-settings")
+        self.assertEqual(settings.load_settings().deepseek_key.get_secret_value(), "old-deepseek")
+
+    def test_custom_endpoint_requires_public_https_and_qwen_region_is_validated(self):
+        for endpoint in ("http://example.com/v1", "https://127.0.0.1/v1"):
+            with self.subTest(endpoint=endpoint):
+                self.assertEqual(self.save(provider="custom", custom_base_url=endpoint).status_code, 422)
+        self.assertEqual(self.save(provider="custom", custom_base_url="https://api.example.com/v1",
+                                   custom_key="custom-secret").status_code, 200)
+        self.assertEqual(self.save(provider="qwen", qwen_base_url="https://evil.example/v1").status_code, 422)
+        self.assertEqual(self.save(provider="qwen", qwen_base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                                   qwen_key="qwen-secret").status_code, 200)
+        config = settings.load_settings()
+        with patch.object(settings.httpx, "Client"), patch.object(settings, "OpenAI") as constructor:
+            settings.create_chat_client(config)
+        self.assertEqual(constructor.call_args.kwargs["base_url"], config.qwen_base_url)
 
     def test_zhipu_search_uses_chat_key(self):
         response = self.save(provider="zhipu", share_chat_key=False,

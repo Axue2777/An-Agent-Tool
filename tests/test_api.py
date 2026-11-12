@@ -76,6 +76,13 @@ class TestChatApi(AppCase):
         record = (self.records / str(self.chat_id) / "chat.md").read_text(encoding="utf-8")
         self.assertIn("RuntimeError", record)
 
+    def test_failed_turn_is_not_sent_to_next_model(self):
+        self.agent.side_effect = [RuntimeError("model busy"), ("恢复正常", [])]
+        self.assertEqual(self.api.post("/chat", json=self.request("失败的问题")).status_code, 502)
+        self.assertEqual(self.api.post("/chat", json=self.request("新的问题")).status_code, 200)
+        history = self.agent.call_args.args[1]
+        self.assertEqual([item["content"] for item in history], ["新的问题"])
+
     def test_web_switch_reaches_agent(self):
         self.api.post("/chat", json=self.request(web_search=False))
         self.assertFalse(self.agent.call_args.kwargs["web_search"])

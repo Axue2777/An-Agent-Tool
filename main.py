@@ -16,14 +16,17 @@ from chat_records import append_record,RECORDS
 from agent_tools import run_agent
 from fastapi.responses import FileResponse
 from pathlib import Path
+from io import BytesIO
+from PIL import Image, UnidentifiedImageError
 from dotenv import load_dotenv
-from document_parser import parse_document
+from document_parser import parse_document, DOCUMENT_SUFFIXES
 from knowledge_store import add_document, add_inventory_csv, list_files, delete_file
 from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from database import (
     init_db,
     save_user_message,
+    mark_user_message_failed,
     save_assistant_message,
     list_conversations,
     get_conversation,
@@ -31,7 +34,9 @@ from database import (
     rename_conversation,
     delete_conversation,
     get_recent_messages,
+    update_persona, save_attachment, list_attachments, delete_attachment,
 )
+from creative_tools import analyze_image
 from api_settings import (
     router as settings_router,
     load_settings,
@@ -108,6 +113,10 @@ class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
     # 默认保持原来的搜索能力，前端可以按请求关闭。
     web_search: bool = True
+    # 思考模式目前仅在 DeepSeek 服务上开启；其他服务仍可正常聊天。
+    thinking: bool = False
+    # 附件编号单独传递，避免把技术编号塞到用户的聊天输入框。
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
 # 历史列表只返回会话信息，避免每次加载所有消息。
 @app.get("/chat/history", tags=["聊天历史"])
@@ -142,9 +151,15 @@ def export_chat(conversation_id: UUID):
 class CreateChatRequest(BaseModel):
     title: str | None = Field(default=None, max_length=60)
     persona: str = Field(default="", max_length=2000)
+    assistant_name: str = Field(default="助手", min_length=1, max_length=30)
 # 限制重命名请求的标题长度。
 class RenameChatRequest(BaseModel):
     title: str = Field(min_length=1, max_length=60)
+
+
+class PersonaRequest(BaseModel):
+    persona: str = Field(default="", max_length=2000)
+    assistant_name: str = Field(default="助手", min_length=1, max_length=30)
 
 
 # 不传请求体时仍创建普通聊天；传入标题和角色时一起保存。
@@ -152,7 +167,10 @@ class RenameChatRequest(BaseModel):
 def create_chat(request: CreateChatRequest | None = None):
     request = request or CreateChatRequest()
     title = request.title.strip() if request.title else None
-    return create_conversation(uuid4(), title=title, persona=request.persona.strip())
+    name = request.assistant_name.strip()
+    if not name:
+        raise HTTPException(422, "助手名字不能为空")
+    return create_conversation(uuid4(), title=title, persona=request.persona.strip(), assistant_name=name)
 
 
 # 更新指定会话的标题。
@@ -164,6 +182,19 @@ def rename_chat(conversation_id: UUID, request: RenameChatRequest):
     if not rename_conversation(conversation_id, title):
         raise HTTPException(status_code=404, detail="聊天记录不存在")
     return {"id": str(conversation_id), "title": title}
+
+
+@app.patch("/chat/history/{conversation_id}/assistant", tags=["聊天历史"])
+def change_assistant(conversation_id: UUID, request: PersonaRequest):
+    """当前聊天的助手设定可随时修改，下一条消息起生效。"""
+    persona = request.persona.strip()
+    name = request.assistant_name.strip()
+    if not name:
+        raise HTTPException(422, "助手名字不能为空")
+    if not update_persona(conversation_id, persona, name):
+        raise HTTPException(404, "聊天记录不存在")
+    append_record(conversation_id, "助手设定", f"名字：{name}\n\n{persona or '恢复默认助手'}")
+    return {"id": str(conversation_id), "persona": persona, "assistant_name": name}
 
 
 # 删除数据库中的会话和消息，保留磁盘上的 Markdown 文件。
@@ -188,8 +219,9 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None, settings=
     conversation_id = request.conversation_id or uuid4()
     chat_info = get_conversation(conversation_id)
     persona = chat_info["persona"] if chat_info else ""
+    assistant_name = chat_info["assistant_name"] if chat_info else "助手"
     # 只追加本轮最新消息，不将浏览器提交的整段历史重复写库。
-    save_user_message(conversation_id, request.messages[-1].content)
+    message_id = save_user_message(conversation_id, request.messages[-1].content)
     append_record(conversation_id, "用户", request.messages[-1].content)
     # 只记录服务、模型和密钥来源说明，绝不记录密钥正文。
     search_note = "关闭"
@@ -202,9 +234,17 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None, settings=
         "是否实际调用搜索，以后续工具记录为准。",
     )
     # 最新用户消息在上方已经入库，这里读取时自然包含本次问题。
-    history = get_recent_messages(conversation_id)
+    thinking = request.thinking and config.provider == "deepseek"
+    history = get_recent_messages(conversation_id, include_reasoning=thinking)
+    allowed_files = {str(file["id"]): file for file in list_attachments(conversation_id)}
+    attached = [allowed_files[str(file_id)] for file_id in request.attachment_ids
+                if str(file_id) in allowed_files]
+    if len(attached) != len(request.attachment_ids):
+        mark_user_message_failed(message_id)
+        raise HTTPException(422, "附件不属于当前聊天，请重新选择")
     # 暂存当前轮文字，取消时只写入 Markdown，不作为完整回答入库。
     partial_reply = []
+    reasoning_parts = []
 
     # 统一处理生成事件，并在安全检查点响应停止信号。
     def emit(event):
@@ -216,6 +256,8 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None, settings=
             partial_reply.clear()
         elif event_type == "text_delta":
             partial_reply.append(event["text"])
+        elif event_type == "reasoning_delta":
+            reasoning_parts.append(event["text"])
         # checkpoint 仅供后端检查，不发送到网页。
         if event_type != "checkpoint" and on_event:
             on_event(event)
@@ -227,8 +269,13 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None, settings=
                 on_event=emit,
                 web_search=use_search,
                 model=model_name(config),
+                provider=config.provider,
                 search_api_key=search_key(config) if use_search else "",
                 persona=persona,
+                assistant_name=assistant_name,
+                thinking=thinking,
+                image_api_key=config.zhipu_key.get_secret_value(),
+                attachment_refs=attached,
             )
         # 完整回答入库前，再检查一次是否收到停止请求。
         check_cancelled(stop_event)
@@ -248,6 +295,7 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None, settings=
             append_record(conversation_id, "助手", "对话内容被主动停止")
             raise TaskCancelled("用户停止生成") from error
         # 将具体出错位置打印到后端终端，便于定位。
+        mark_user_message_failed(message_id)
         traceback.print_exc()
 
         # Markdown 记录异常类型，网页继续显示简洁提示。
@@ -263,13 +311,25 @@ def process_chat(request: ChatRequest, on_event=None, stop_event=None, settings=
             detail=detail or "Agent 执行失败，请查看后端终端",
         ) from error
     # Agent 已成功返回，再保存完整回答和工具步骤。
-    save_assistant_message(conversation_id, reply, tool_steps)
+    reasoning = "".join(reasoning_parts)
+    tool_failed = any(isinstance(step.get("result"), dict)
+                      and step["result"].get("error") for step in tool_steps)
+    if tool_failed:
+        mark_user_message_failed(message_id)
+    save_assistant_message(conversation_id, reply, tool_steps,
+                           reasoning=reasoning, provider=config.provider,
+                           model=model_name(config), failed=tool_failed)
+    if reasoning:
+        append_record(conversation_id, "思考过程", reasoning)
     append_record(conversation_id, "助手", reply)
         # 工具步骤单独返回，方便前端展示。
     return {
         "reply": reply,
         "conversation_id": str(conversation_id),
         "tool_steps": tool_steps,
+        "reasoning": reasoning,
+        "provider": config.provider,
+        "model": model_name(config),
     }
 
 # 普通聊天接口：等待任务完成后，一次返回完整结果。
@@ -280,10 +340,23 @@ def chat(request: ChatRequest):
 # 根据合法的会话编号和文件编号下载报告。
 @app.get("/chat/files/{conversation_id}/{file_id}",tags=["AI操作"])
 def download_report(conversation_id: UUID, file_id: UUID):
-    path = RECORDS / str(conversation_id) / "artifacts" / f"{file_id}.md"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="报告不存在")
-    return FileResponse(path, media_type="text/markdown", filename="report.md")
+    folder = RECORDS / str(conversation_id) / "artifacts"
+    for suffix, media, filename in (
+        (".md", "text/markdown", "report.md"),
+        (".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "presentation.pptx"),
+        (".png", "image/png", "generated.png"),
+        (".jpg", "image/jpeg", "generated.jpg"),
+        (".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "document.docx"),
+        (".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "spreadsheet.xlsx"),
+        (".pdf", "application/pdf", "document.pdf"),
+        *((f".{ext}", "text/plain; charset=utf-8", f"file.{ext}") for ext in
+          ("txt", "csv", "json", "py", "js", "ts", "vue", "html", "css", "xml", "yaml", "yml", "sql")),
+    ):
+        path = folder / f"{file_id}{suffix}"
+        if path.is_file():
+            return FileResponse(path, media_type=media, filename=filename,
+                                content_disposition_type="inline" if suffix in {".png", ".jpg"} else "attachment")
+    raise HTTPException(status_code=404, detail="成果文件不存在")
 
 if __name__ == "__main__":
     # 开发时监视项目文件，保存后自动重载，避免继续运行旧版工具代码。
@@ -296,8 +369,8 @@ async def upload_knowledge(conversation_id: UUID, file: UploadFile = File(...)):
         raise HTTPException(404, "聊天不存在")
     filename = " ".join((file.filename or "资料").split())[:120]
     suffix = Path(filename).suffix.lower()
-    if suffix not in {".txt", ".md", ".pdf", ".docx", ".csv"}:
-        raise HTTPException(400, "资料库只支持 txt、md、pdf、docx、csv")
+    if suffix not in DOCUMENT_SUFFIXES - {".png", ".jpg", ".jpeg"}:
+        raise HTTPException(400, "资料库不支持这种文件格式")
     try:
         content = await file.read(10 * 1024 * 1024 + 1)
         if len(content) > 10 * 1024 * 1024:
@@ -334,6 +407,65 @@ def knowledge_delete(conversation_id: UUID, file_id: UUID):
     return {"deleted": True}
 
 
+# 分别列出聊天附件和资料库文件，页面能展示哪些已上传。
+@app.get("/chat/history/{conversation_id}/files", tags=["聊天历史"])
+def conversation_files(conversation_id: UUID):
+    if get_conversation(conversation_id) is None:
+        raise HTTPException(404, "聊天不存在")
+    return {"attachments": list_attachments(conversation_id),
+            "knowledge": list_files(conversation_id)}
+
+
+@app.delete("/chat/history/{conversation_id}/attachments/{file_id}", tags=["聊天历史"])
+def remove_attachment(conversation_id: UUID, file_id: UUID):
+    # 先验证数据库归属，再删除当前聊天的文件；不接受客户端传入文件路径。
+    if not delete_attachment(conversation_id, file_id):
+        raise HTTPException(404, "当前聊天没有这个附件")
+    folder = RECORDS / str(conversation_id) / "attachments"
+    for suffix in (".txt", ".png", ".jpg", ".jpeg"):
+        (folder / f"{file_id}{suffix}").unlink(missing_ok=True)
+    append_record(conversation_id, "删除附件", f"编号：{file_id}")
+    return {"deleted": True}
+
+
+class VisionRequest(BaseModel):
+    file_id: UUID
+    question: str = Field(default="请描述这张图片的内容。", min_length=1, max_length=2000)
+
+
+@app.post("/chat/history/{conversation_id}/analyze-image", tags=["AI操作"])
+def analyze_uploaded_image(conversation_id: UUID, request: VisionRequest):
+    """仅响应页面上针对具体文件的识图按钮；用户已明确选择发送给智谱。"""
+    if get_conversation(conversation_id) is None:
+        raise HTTPException(404, "聊天不存在")
+    selected = next((item for item in list_attachments(conversation_id)
+                     if item["id"] == str(request.file_id) and item["kind"] == "image"), None)
+    if selected is None:
+        raise HTTPException(404, "当前聊天没有这张图片")
+    config = load_settings()
+    api_key = config.zhipu_key.get_secret_value()
+    if not api_key:
+        raise HTTPException(422, "请先在 API 设置中填写智谱标准 API 密钥")
+    try:
+        result = analyze_image(str(request.file_id), request.question, conversation_id, api_key)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    except Exception as error:
+        traceback.print_exc()
+        raise HTTPException(502, f"智谱识图失败：{type(error).__name__}") from None
+    if not result["description"].strip():
+        raise HTTPException(502, "智谱识图没有返回内容")
+    # 成功后才保存问答，避免把失败请求误记为已理解图片。
+    user_text = f"识图：{selected['filename']}（{request.file_id}）\n{request.question}"
+    save_user_message(conversation_id, user_text)
+    save_assistant_message(conversation_id, result["description"], [],
+                           provider="zhipu", model=result["model"])
+    append_record(conversation_id, "用户", user_text)
+    append_record(conversation_id, "API 使用说明", f"识图：智谱 / {result['model']}")
+    append_record(conversation_id, "助手", result["description"])
+    return {"reply": result["description"], "provider": "zhipu", "model": result["model"]}
+
+
 # 接收当前聊天的文本附件，限制格式、大小和编码。
 @app.post("/chat/upload/{conversation_id}",tags=["AI操作"])
 async def upload_file(
@@ -344,31 +476,55 @@ async def upload_file(
         filename = file.filename or "attachment.txt"
         suffix = Path(filename).suffix.lower()
 
-        # 第一版只支持 UTF-8 编码的文本和 Markdown。
-                # 扩展格式，限制上传文件不超过 10 MB。
-        if suffix not in {".txt", ".md", ".pdf", ".docx",".png",".jpg",".jpeg"}:
-            raise HTTPException(status_code=400, detail="只支持 txt、md、pdf、docx")
+        # 同时支持文档和图片；图片保留原图，供用户主动点击识图。
+        if suffix not in DOCUMENT_SUFFIXES:
+            raise HTTPException(status_code=400, detail="不支持这种文件格式；可选择文本、代码、PDF、Word、Excel、PPT 或图片")
         content = await file.read(10 * 1024 * 1024 + 1)
         if len(content) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="文件不能超过 10 MB")
 
-        # 在线程中解析，避免阻塞其他异步请求。
+        is_image = suffix in {".png", ".jpg", ".jpeg"}
+        if is_image:
+            try:
+                with Image.open(BytesIO(content)) as image:
+                    image.verify()
+                with Image.open(BytesIO(content)) as image:
+                    if image.width * image.height > 40_000_000:
+                        raise ValueError("图片像素过大")
+                    expected_format = "PNG" if suffix == ".png" else "JPEG"
+                    if image.format != expected_format:
+                        raise ValueError("图片格式与扩展名不匹配")
+            except (UnidentifiedImageError, OSError, ValueError) as error:
+                raise HTTPException(400, f"无效图片：{error}") from None
+        # 图片 OCR 即使没有识别出文字，也保留原图供视觉模型分析。
         try:
             text = await run_in_threadpool(parse_document, content, suffix)
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error))
+            if is_image:
+                text = ""
+            else:
+                raise HTTPException(status_code=400, detail=str(error)) from None
         except Exception as error:
-            print(f"Agent 执行失败：{type(error).__name__}")
-            raise HTTPException(status_code=400, detail="解析失败，请检查文件是否完整")
-        if not text.strip():
+            if is_image:
+                text = ""
+            else:
+                print(f"Agent 执行失败：{type(error).__name__}")
+                raise HTTPException(status_code=400, detail="解析失败，请检查文件是否完整") from None
+        if not is_image and not text.strip():
             raise HTTPException(status_code=400, detail="没有提取到可用文字")
+        if get_conversation(conversation_id) is None:
+            raise HTTPException(404, "聊天不存在")
 
         # 使用程序生成的编号保存，避免同名覆盖和文件路径问题。
         file_id = uuid4()
         folder = RECORDS / str(conversation_id) / "attachments"
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{file_id}.txt"
-        path.write_text(text, encoding="utf-8")
+        if is_image:
+            (folder / f"{file_id}{suffix}").write_bytes(content)
+        if text.strip():
+            (folder / f"{file_id}.txt").write_text(text, encoding="utf-8")
+        save_attachment(conversation_id, file_id, " ".join(filename.split())[:120],
+                        "image" if is_image else "document")
 
         # 聊天记录中留下上传事件，正文单独保存。
         append_record(conversation_id, "上传附件", f"名称：{filename}\n\n编号：{file_id}")
@@ -376,6 +532,7 @@ async def upload_file(
             "file_id": str(file_id),
             "filename": filename,
             "characters": len(text),
+            "kind": "image" if is_image else "document",
         }
     finally:
         # 无论成功还是失败，都关闭上传文件。

@@ -2,7 +2,7 @@
 import { onMounted, ref, watch } from 'vue'
 
 const props = defineProps({ conversationId: { type: String, required: true } })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'changed'])
 const files = ref([])
 const busy = ref(false)
 const error = ref('')
@@ -25,6 +25,10 @@ async function loadFiles() {
 async function upload(event) {
   const selected = Array.from(event.target.files || [])
   if (!selected.length) return
+  if (!window.confirm(`允许将 ${selected.map(file => file.name).join('、')} 加入当前聊天资料库，供模型按需读取？`)) {
+    picker.value.value = ''
+    return
+  }
   busy.value = true
   error.value = ''
   try {
@@ -45,6 +49,7 @@ async function upload(event) {
     picker.value.value = ''
     busy.value = false
     await loadFiles()
+    emit('changed')
   }
 }
 
@@ -63,6 +68,7 @@ async function remove(file) {
   } finally {
     busy.value = false
     await loadFiles()
+    emit('changed')
   }
 }
 
@@ -71,6 +77,8 @@ onMounted(loadFiles)
 </script>
 
 <template>
+  <!-- 与新建聊天弹窗一样，挂到 body，避免顶部栏限制定位。 -->
+  <Teleport to="body">
   <div class="knowledge-backdrop">
     <section class="knowledge-panel" role="dialog" aria-modal="true" aria-label="当前聊天的资料库">
       <header>
@@ -78,7 +86,7 @@ onMounted(loadFiles)
         <button type="button" :disabled="busy" @click="emit('close')">关闭</button>
       </header>
       <input ref="picker" type="file" multiple :disabled="busy" @change="upload"
-        accept=".txt,.md,.pdf,.docx,.csv" aria-label="添加资料" />
+        accept=".txt,.md,.csv,.json,.py,.js,.ts,.vue,.html,.css,.xml,.yaml,.yml,.sql,.pdf,.docx,.xlsx,.pptx" aria-label="添加资料" />
       <p v-if="error" role="alert">{{ error }}</p>
       <p v-if="!files.length">暂无资料</p>
       <ul v-else>
@@ -89,11 +97,12 @@ onMounted(loadFiles)
       </ul>
     </section>
   </div>
+  </Teleport>
 </template>
 
 <style scoped>
 .knowledge-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / 40%); }
-.knowledge-panel { box-sizing: border-box; width: min(560px, 100%); max-height: calc(100dvh - 32px); overflow: auto; padding: 20px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #20242b; }
+.knowledge-panel { box-sizing: border-box; width: min(560px, 100%); max-height: calc(100dvh - 32px); overflow: auto; padding: 20px; border: 1px solid #c8b9ed; border-radius: 20px; background: #fffdfb; color: #354063; }
 .knowledge-panel header, .knowledge-panel li { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .knowledge-panel h2 { margin: 0 0 14px; font-size: 18px; }
 .knowledge-panel ul { padding-left: 20px; }

@@ -101,11 +101,12 @@ def lookup_inventory(conversation_id, product_name):
         raise ValueError("商品名不能为空或超过 100 字")
     with connect_db() as db:
         exact = db.execute("""
-            SELECT product_name, stock FROM inventory_items
+            SELECT product_name, stock, file_id FROM inventory_items
             WHERE conversation_id = ? AND product_name = ?
         """, (str(conversation_id), name)).fetchone()
         if exact:
-            return {"found": True, "product_name": exact["product_name"], "stock": exact["stock"]}
+            return {"found": True, "product_name": exact["product_name"],
+                    "stock": exact["stock"], "file_id": exact["file_id"]}
         candidates = db.execute("""
             SELECT product_name FROM inventory_items
             WHERE conversation_id = ? AND instr(product_name, ?) > 0
@@ -121,7 +122,7 @@ def search_chunks(conversation_id, query):
         raise ValueError("搜索词不能为空")
     with connect_db() as db:
         rows = db.execute("""
-            SELECT f.filename, c.chunk_index, c.content
+            SELECT f.id AS file_id, f.filename, c.chunk_index, c.content
             FROM knowledge_chunks AS c
             JOIN knowledge_files AS f ON f.id = c.file_id
             WHERE f.conversation_id = ? AND instr(c.content, ?) > 0

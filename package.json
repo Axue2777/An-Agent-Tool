@@ -10,10 +10,12 @@
   "main": "electron/main.cjs",
   "scripts": {
     "desktop": "electron .",
-    "pack:desktop": "electron-builder --win --x64 --dir --publish never",
-    "dist:desktop": "electron-builder --win nsis --x64 --publish never"
+    "build:frontend": "npm --prefix fronted run build",
+    "build:backend": ".\\.venv\\Scripts\\python.exe -m PyInstaller --noconfirm agent-backend.spec",
+    "pack:desktop": "npm run build:frontend && npm run build:backend && electron-builder --win --x64 --dir --publish never",
+    "dist:desktop": "npm run build:frontend && npm run build:backend && electron-builder --win nsis --x64 --publish never"
   },
   "name": "agent-workspace",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agent desktop workspace"
 }

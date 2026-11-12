@@ -53,9 +53,15 @@ async function handle(req, res) {
     res.end(JSON.stringify({
       revision: 'test-only', provider: settingsProvider,
       deepseek_model: 'deepseek-flash', zhipu_model: 'glm-4.7-flash',
+      qwen_model: 'qwen-plus', openai_model: 'gpt-5-mini',
+      gemini_model: 'gemini-3.8-flash', custom_model: 'custom-model',
+      qwen_base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      custom_base_url: '',
       search_enabled: true, share_chat_key: settingsProvider === 'zhipu',
       chat_configured: true, search_configured: true,
       has_deepseek_key: true, has_zhipu_key: true, has_search_key: true,
+      has_qwen_key: false, has_openai_key: false,
+      has_gemini_key: false, has_custom_key: false,
     }))
     return
   }
@@ -63,7 +69,7 @@ async function handle(req, res) {
     if (req.method === 'POST') {
       const settings = JSON.parse((await readBody(req)).toString() || '{}')
       const chat = { id: randomUUID(), title: settings.title || '新建聊天',
-        persona: settings.persona || '', messages: [] }
+        persona: settings.persona || '', assistant_name: settings.assistant_name || '助手', messages: [] }
       chats.set(chat.id, chat)
       return json(res, chat)
     }
@@ -88,6 +94,22 @@ async function handle(req, res) {
   if (parts[0] === 'chat' && parts[1] === 'history') {
     const chat = chats.get(parts[2])
     if (!chat) return json(res, { detail: '不存在' }, 404)
+    if (parts[3] === 'files') return json(res, { attachments: chat.attachments || [], knowledge: chat.knowledge || [] })
+    if (parts[3] === 'attachments' && req.method === 'DELETE') {
+      chat.attachments = (chat.attachments || []).filter(file => file.id !== parts[4])
+      return json(res, { deleted: true })
+    }
+    if (parts[3] === 'assistant' && req.method === 'PATCH') {
+      const update = JSON.parse((await readBody(req)).toString())
+      chat.persona = update.persona
+      chat.assistant_name = update.assistant_name
+      return json(res, { id: chat.id, persona: chat.persona, assistant_name: chat.assistant_name })
+    }
+    if (parts[3] === 'analyze-image' && req.method === 'POST') {
+      const payload = JSON.parse((await readBody(req)).toString())
+      requests.push({ vision: payload })
+      return json(res, { reply: '这是一片蓝天', provider: 'zhipu', model: 'glm-5.3-flash' })
+    }
     if (parts[3] === 'export') {
       res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' })
       return res.end('# 测试聊天\n\n导出的 Markdown')
@@ -99,8 +121,13 @@ async function handle(req, res) {
     return json(res, chat)
   }
   if (url.pathname.startsWith('/chat/upload/')) {
-    await readBody(req)
-    return json(res, { filename: '资料.md', file_id: '33333333-3333-4333-8333-333333333333' })
+    const upload = (await readBody(req)).toString('utf8')
+    const chat = chats.get(parts[2])
+    chat.attachments ||= []
+    const item = { filename: /filename="([^"]+)"/.exec(upload)?.[1] || '资料.md',
+      file_id: randomUUID(), kind: 'document' }
+    chat.attachments.push({ id: item.file_id, filename: item.filename, kind: item.kind })
+    return json(res, item)
   }
   if (url.pathname === '/chat/stream') {
     const payload = JSON.parse((await readBody(req)).toString())
@@ -120,7 +147,7 @@ async function handle(req, res) {
       pending = { res, chat }
       return
     }
-    if (mode === 'tools') {
+    if (mode === 'tools' || mode === 'workspace') {
       event(res, { type: 'tool_start', name: 'save_report' })
       await new Promise(resolve => setTimeout(resolve, 500))
       event(res, { type: 'tool_end', name: 'save_report', result: { download_url: '/test/report.md' }, duration_ms: 100 })
@@ -129,7 +156,9 @@ async function handle(req, res) {
     const reply = '测试回答：**已完成**'
     chat.messages.push({ role: 'assistant', content: reply })
     event(res, { type: 'text_delta', text: reply })
-    event(res, { type: 'done', data: { conversation_id: chat.id, reply, tool_steps: [] } })
+    const tool_steps = mode === 'workspace' ? [{ name: 'save_report',
+      result: { download_url: `/chat/files/${chat.id}/${randomUUID()}`, filename: 'report.md' } }] : []
+    event(res, { type: 'done', data: { conversation_id: chat.id, reply, tool_steps } })
     return res.end()
   }
   if (url.pathname.endsWith('/cancel')) {
@@ -154,10 +183,26 @@ async function check(name, fn) {
   try { await fn(); checks.push({ name, status: 'passed' }); console.log('PASS', name) }
   catch (error) { checks.push({ name, status: 'failed', error: error.message }); console.log('FAIL', name, error.message) }
 }
-async function pageFor(origin, viewport = { width: 1440, height: 900 }, provider = 'zhipu') {
+async function pageFor(origin, viewport = { width: 1440, height: 900 }, provider = 'zhipu', desktop = false) {
   reset()
   settingsProvider = provider
   const context = await browser.newContext({ viewport, acceptDownloads: true })
+  if (desktop) await context.addInitScript(({ fileId }) => {
+    window.__workspaceReads = []
+    window.__workspaceSaves = []
+    window.agentDesktop = {
+      getWorkspace: async () => ({ folder: 'D:\\WorkFiles' }),
+      chooseWorkspace: async () => ({ canceled: false, folder: 'D:\\WorkFiles' }),
+      readWorkspaceFile: async (chatId, purpose, provider) => {
+        window.__workspaceReads.push({ chatId, purpose, provider })
+        return { canceled: false, file_id: fileId, filename: '学习.md', kind: 'document' }
+      },
+      saveToWorkspace: async (url, filename, purpose) => {
+        window.__workspaceSaves.push({ url, filename, purpose })
+        return { canceled: false, path: `D:\\WorkFiles\\${filename}` }
+      },
+    }
+  }, { fileId: B })
   await context.addInitScript(({ id }) => {
     if (!localStorage.getItem('agent-selected-chat')) localStorage.setItem('agent-selected-chat', id)
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: async text => { window.__copied = text } } })
@@ -177,8 +222,8 @@ async function pageFor(origin, viewport = { width: 1440, height: 900 }, provider
 async function done(page) {
   await page.waitForFunction(() => !document.querySelector('.composer-editor').disabled)
 }
-async function fixture(origin, fn, viewport, provider) {
-  const { page, context } = await pageFor(origin, viewport, provider)
+async function fixture(origin, fn, viewport, provider, desktop = false) {
+  const { page, context } = await pageFor(origin, viewport, provider, desktop)
   try { await fn(page) } finally { await context.close(); if (pending) { pending.res.end(); pending = null } }
 }
 async function run() {
@@ -200,6 +245,18 @@ async function run() {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const origin = 'http://127.0.0.1:' + server.address().port
   browser = await playwright.chromium.launch({ channel: 'msedge', headless: true })
+  await check('API 设置可切换服务商并分别编辑模型', () => fixture(origin, async page => {
+    await page.getByRole('button', { name: 'API 设置' }).click()
+    const dialog = page.getByRole('dialog', { name: 'API 设置' })
+    await dialog.getByLabel('服务商').selectOption('qwen')
+    assert.equal(await dialog.getByLabel('模型编号（可直接修改）').inputValue(), 'qwen-plus')
+    await dialog.getByLabel('模型编号（可直接修改）').fill('qwen-flash')
+    await dialog.getByLabel('服务商').selectOption('gemini')
+    assert.equal(await dialog.getByLabel('模型编号（可直接修改）').inputValue(), 'gemini-3.8-flash')
+    await dialog.getByLabel('服务商').selectOption('qwen')
+    assert.equal(await dialog.getByLabel('模型编号（可直接修改）').inputValue(), 'qwen-flash')
+    await dialog.getByText('已保存的密钥不会回显到输入框').waitFor()
+  }))
   await check('恢复选中聊天、标题同步、置顶高亮', () => fixture(origin, async page => {
     assert.equal(await page.locator('.current-chat-title').innerText(), 'Vue 学习')
     assert.equal(await page.locator('.history-row.selected').count(), 1)
@@ -209,6 +266,24 @@ async function run() {
     await page.reload(); await done(page)
     assert.equal(await page.locator('.current-chat-title').innerText(), '报告草稿')
   }))
+  await check('顶部模型、文件卡片与当前聊天助手设定', () => fixture(origin, async page => {
+    await page.getByRole('region', { name: '使用模型' }).getByText('下一轮：zhipu · glm-4.7-flash').waitFor()
+    await page.getByRole('button', { name: '助手设定', exact: true }).click()
+    const editor = page.getByRole('dialog', { name: '助手设定' })
+    await editor.getByRole('textbox', { name: '助手名字' }).fill('小月')
+    await editor.getByRole('textbox', { name: '助手角色设定' }).fill('耐心的老师')
+    await editor.getByRole('button', { name: '保存' }).click()
+    await editor.waitFor({ state: 'hidden' })
+    assert.equal(chats.get(A).persona, '耐心的老师')
+    assert.equal(chats.get(A).assistant_name, '小月')
+    assert.equal(await page.getByRole('region', { name: '本聊天文件' }).getByText('暂无文件').count(), 1)
+  }))
+  await check('DeepSeek 思考开关随本轮请求发送', () => fixture(origin, async page => {
+    await page.getByLabel('深度思考').check()
+    await page.locator('.composer-editor').fill('思考一下')
+    await page.getByRole('button', { name: '发送', exact: true }).click(); await done(page)
+    assert.equal(requests.at(-1).thinking, true)
+  }, undefined, 'deepseek'))
   await check('各聊天草稿隔离、刷新恢复', () => fixture(origin, async page => {
     await page.getByRole('textbox', { name: '消息', exact: true }).fill('Vue 草稿')
     await page.getByRole('button', { name: '报告草稿', exact: true }).click(); await done(page)
@@ -253,18 +328,25 @@ async function run() {
   }))
   await check('新建聊天时上传资料并在资料库查看', () => fixture(origin, async page => {
     await page.getByRole('button', { name: '＋ 新建聊天', exact: true }).click()
+    const setupBounds = await page.getByRole('dialog', { name: '新建聊天' }).boundingBox()
+    assert.ok(setupBounds && setupBounds.y >= 0 && setupBounds.y + setupBounds.height <= 900)
     await page.getByLabel('资料库文件（可稍后上传）').setInputFiles({
       name: 'stock.csv', mimeType: 'text/csv', buffer: Buffer.from('product_name,stock\nmouse,2\n'),
     })
+    page.once('dialog', dialog => dialog.accept())
     await page.getByRole('button', { name: '开始聊天', exact: true }).click(); await done(page)
     await page.getByRole('button', { name: '资料库', exact: true }).click()
+    const knowledgeBounds = await page.getByRole('dialog', { name: '当前聊天的资料库' }).boundingBox()
+    assert.ok(knowledgeBounds && knowledgeBounds.y >= 0 && knowledgeBounds.y + knowledgeBounds.height <= 900)
     await page.getByText('stock.csv · 库存表').waitFor()
   }))
   await check('聊天重命名、删除与草稿清理', () => fixture(origin, async page => {
     await page.locator('.history-entry').first().hover()
     await page.getByRole('button', { name: '聊天选项', exact: true }).first().click()
-    page.once('dialog', dialog => dialog.accept('我的新标题'))
-    await page.getByRole('button', { name: '重命名', exact: true }).click(); await done(page)
+    await page.locator('.chat-options').getByRole('button', { name: '重命名', exact: true }).click()
+    const renameDialog = page.getByRole('dialog', { name: '重命名聊天' })
+    await renameDialog.getByRole('textbox', { name: '新的聊天名称' }).fill('我的新标题')
+    await renameDialog.getByRole('button', { name: '保存' }).click(); await done(page)
     assert.equal(await page.locator('.current-chat-title').innerText(), '我的新标题')
     await page.locator('.composer-editor').fill('待删除草稿')
     await page.locator('.history-entry').first().hover()
@@ -347,13 +429,44 @@ async function run() {
     await file.saveAs(path.join(artifacts, 'exported-chat.md'))
     assert.match(fs.readFileSync(path.join(artifacts, 'exported-chat.md'), 'utf8'), /测试聊天/)
   }))
-  await check('附件上传保留草稿并添加附件编号', () => fixture(origin, async page => {
+  await check('附件上传保留草稿并在文件框显示', () => fixture(origin, async page => {
     await page.locator('.composer-editor').fill('请分析此资料')
+    page.once('dialog', dialog => dialog.accept())
     await page.getByLabel('上传资料', { exact: true }).setInputFiles({ name: '资料.md', mimeType: 'text/markdown', buffer: Buffer.from('# 学习资料') })
-    await page.waitForFunction(() => document.querySelector('.composer-editor').value.includes('附件编号'))
-    assert.match(await page.locator('.composer-editor').inputValue(), /^请分析此资料/)
-    assert.match(await page.locator('.composer-editor').inputValue(), /资料\.md/)
+    await page.getByRole('region', { name: '本聊天文件' }).getByText('资料.md').waitFor()
+    assert.equal(await page.locator('.composer-editor').inputValue(), '请分析此资料')
+    await page.getByRole('button', { name: '发送', exact: true }).click(); await done(page)
+    assert.equal(requests.at(-1).attachment_ids.length, 1)
+    page.once('dialog', dialog => dialog.accept())
+    await page.getByRole('region', { name: '本聊天文件' }).getByRole('button', { name: '下轮读取' }).click()
+    await page.locator('.composer-editor').fill('再读一次')
+    await page.getByRole('button', { name: '发送', exact: true }).click(); await done(page)
+    assert.equal(requests.at(-1).attachment_ids.length, 1)
   }))
+  await check('多文件上传后列出每个选中的文件', () => fixture(origin, async page => {
+    page.once('dialog', dialog => dialog.accept())
+    await page.getByLabel('上传资料', { exact: true }).setInputFiles([
+      { name: '第一份.md', mimeType: 'text/markdown', buffer: Buffer.from('# A') },
+      { name: '第二份.json', mimeType: 'application/json', buffer: Buffer.from('{"ok":true}') },
+    ])
+    await page.getByRole('region', { name: '本聊天文件' }).getByText('第二份.json').waitFor()
+    const draft = await page.locator('.composer-editor').inputValue()
+    assert.equal(draft, '')
+    assert.equal(await page.getByRole('region', { name: '本聊天文件' }).getByText('第一份.md').count(), 1)
+  }))
+  await check('工作文件夹请求先选文件，生成后逐份请求保存', () => fixture(origin, async page => {
+    mode = 'workspace'
+    await page.locator('.composer-editor').fill('读取工作文件夹中的学习资料并生成报告')
+    await page.getByRole('button', { name: '发送', exact: true }).click(); await done(page)
+    const operations = await page.evaluate(() => ({
+      reads: window.__workspaceReads, saves: window.__workspaceSaves,
+    }))
+    assert.equal(operations.reads.length, 1)
+    assert.match(operations.reads[0].purpose, /读取工作文件夹/)
+    assert.equal(requests.at(-1).attachment_ids.length, 1)
+    assert.equal(operations.saves.length, 1)
+    assert.equal(operations.saves[0].filename, 'report.md')
+  }, undefined, 'zhipu', true))
   for (const width of [1440, 768, 390, 320]) {
     await check('布局宽度 ' + width + '：对齐、无横向溢出、侧栏伸缩', () => fixture(origin, async page => {
       for (const collapsed of [false, true]) {

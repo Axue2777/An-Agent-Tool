@@ -33,7 +33,16 @@ class TestModelStream(unittest.TestCase):
         kwargs = client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["tool_choice"], "none")
         self.assertTrue(kwargs["stream"])
+        self.assertIn("extra_body", kwargs)
         context.__exit__.assert_called_once()
+
+    def test_non_deepseek_does_not_send_thinking_parameter(self):
+        client, _ = self.prepare([chunk("OK", finish="stop")])
+        request_stream_message(client, [], [], "none", provider="gemini",
+                               model="gemini-3.8-flash")
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertNotIn("extra_body", kwargs)
+        self.assertEqual(kwargs["model"], "gemini-3.8-flash")
 
     def test_fragmented_and_interleaved_calls_keep_ids_and_order(self):
         client, _ = self.prepare([

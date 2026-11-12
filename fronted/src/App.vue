@@ -11,6 +11,22 @@ import DOMPurify from 'dompurify'
 const input = ref('')
 const showNewChatSetup = ref(false)
 const showKnowledgePanel = ref(false)
+const showPersonaEditor = ref(false)
+const personaDraft = ref('')
+const currentPersona = ref('')
+const assistantNameDraft = ref('助手')
+const currentAssistantName = ref('助手')
+const renameTarget = ref(null)
+const renameDraft = ref('')
+const pendingAttachmentIds = ref([])
+const selectedFiles = ref({ attachments: [], knowledge: [] })
+const fileNotice = ref('')
+const thinkingEnabled = ref(false)
+const currentProvider = ref('deepseek')
+const currentModel = ref('deepseek-flash')
+const imageAvailable = ref(false)
+const desktopAvailable = Boolean(window.agentDesktop)
+const workspaceFolder = ref('')
 const messages = ref([])
 const loading = ref(false)
 // 控制下一次发送是否允许联网搜索。
@@ -19,6 +35,10 @@ const webSearchEnabled = ref(true)
 // 后端总开关决定是否可用，原按钮控制本轮是否允许。
 const searchAvailable = ref(false)
 function applyApiSettings(settings) {
+  currentProvider.value = settings.provider
+  currentModel.value = settings[`${settings.provider}_model`] || ''
+  imageAvailable.value = !!settings.has_zhipu_key
+  if (settings.provider !== 'deepseek') thinkingEnabled.value = false
   searchAvailable.value = settings.provider === 'zhipu'
     && settings.search_enabled && settings.search_configured
   webSearchEnabled.value = searchAvailable.value
@@ -42,6 +62,7 @@ const sidebarOpen = ref(true)
 const menuChatId = ref(null)
 const progress = ref('')
 const streamingText = ref('')
+const streamingReasoning = ref('')
 const messageList = ref(null)
 const followLatest = ref(true)
 // 当前任务编号和停止请求状态。
@@ -53,6 +74,98 @@ const currentChatTitle = computed(() => {
   const chat = savedChats.value.find(item => item.id === conversationId.value)
   return chat?.title || 'Agent 聊天'
 })
+// 顶部只显示真实用过的模型，另把当前选择的模型标成“下一轮”。
+const modelUsages = computed(() => {
+  const used = new Map()
+  for (const message of messages.value) {
+    if (message.role === 'assistant' && message.provider && message.model) {
+      used.set(`${message.provider}/${message.model}`, `${message.provider} · ${message.model}`)
+    }
+    for (const step of message.tool_steps || []) {
+      const result = step.result || {}
+      if (result.provider && result.model) {
+        used.set(`${result.provider}/${result.model}`, `${result.provider} · ${result.model}`)
+      }
+    }
+  }
+  return [...used.values()]
+})
+const allFiles = computed(() => [
+  ...selectedFiles.value.attachments.map(file => ({ ...file, source: '附件' })),
+  ...selectedFiles.value.knowledge.map(file => ({ ...file, source: '资料库' })),
+])
+const readFileIds = computed(() => {
+  const ids = new Set()
+  for (const message of messages.value) {
+    for (const step of message.tool_steps || []) {
+      if (step.name === 'read_attachment') {
+        try { ids.add(JSON.parse(step.arguments).file_id) } catch { /* 旧记录格式不正确 */ }
+      }
+      if (step.name === 'search_knowledge') {
+        for (const match of step.result?.matches || []) if (match.file_id) ids.add(match.file_id)
+      }
+      if (step.name === 'lookup_inventory' && step.result?.file_id) ids.add(step.result.file_id)
+    }
+    if (message.role === 'user' && message.content.startsWith('识图：')) {
+      const match = message.content.match(/\(([0-9a-f-]{36})\)/i)
+      if (match) ids.add(match[1])
+    }
+  }
+  return ids
+})
+async function refreshFiles(id = conversationId.value) {
+  if (!id) { selectedFiles.value = { attachments: [], knowledge: [] }; return }
+  try {
+    const data = await requestJson(`/chat/history/${encodeURIComponent(id)}/files`)
+    if (conversationId.value === id) selectedFiles.value = data
+  } catch (cause) {
+    if (conversationId.value === id) error.value = `文件列表读取失败：${cause.message}`
+  }
+}
+
+function openPersonaEditor() {
+  personaDraft.value = currentPersona.value
+  assistantNameDraft.value = currentAssistantName.value
+  showPersonaEditor.value = true
+}
+
+async function savePersona() {
+  if (!conversationId.value || loading.value) return
+  loading.value = true
+  try {
+    const data = await requestJson(`/chat/history/${conversationId.value}/assistant`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ persona: personaDraft.value,
+        assistant_name: assistantNameDraft.value.trim() }),
+    })
+    currentPersona.value = data.persona
+    currentAssistantName.value = data.assistant_name
+    showPersonaEditor.value = false
+  } catch (cause) { error.value = cause.message }
+  finally { loading.value = false }
+}
+
+async function inspectImage(file) {
+  if (loading.value || !conversationId.value) return
+  const question = window.prompt(`想了解“${file.filename}”的什么内容？`, '请描述这张图片的内容和重要细节。')
+  if (!question?.trim()) return
+  // 对话框明确告知图片名与接收方，取消时不会发生网络上传。
+  if (!window.confirm(`将“${file.filename}”发送给智谱视觉 API 识图？`)) return
+  loading.value = true
+  progress.value = '正在使用智谱识图…'
+  error.value = ''
+  try {
+    const data = await requestJson(`/chat/history/${conversationId.value}/analyze-image`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: file.id, question: question.trim() }),
+    })
+    messages.value.push({ role: 'user', content: `识图：${file.filename}（${file.id}）\n${question.trim()}` })
+    messages.value.push({ role: 'assistant', content: data.reply,
+      provider: data.provider, model: data.model })
+    await loadHistory()
+  } catch (cause) { error.value = cause.message }
+  finally { progress.value = ''; loading.value = false }
+}
 // 仅展示本轮实时进度，最终执行记录仍由后端保存。
 const liveToolSteps = ref([])
 // 记录哪条消息刚复制成功，以及恢复图标的定时器。
@@ -101,6 +214,122 @@ async function exportChat() {
   }
 }
 
+// 仅桌面版可以调出系统“另存为”；网页仍保留普通下载链接。
+async function saveArtifactToFolder(step) {
+  if (!desktopAvailable) return
+  const url = step.result?.download_url || step.result?.image_url
+  const names = {
+    save_report: 'report.md', save_presentation: 'presentation.pptx',
+    generate_image: 'generated.png', save_document: 'document.docx',
+    save_spreadsheet: 'spreadsheet.xlsx', save_pdf: 'document.pdf',
+  }
+  const filename = step.result?.filename || names[step.name] || 'file.txt'
+  try {
+    const result = await window.agentDesktop.saveArtifact(url, filename)
+    if (!result.canceled) fileNotice.value = `已保存到你选择的位置：${result.filename}`
+  } catch (cause) { error.value = `保存文件失败：${cause.message}` }
+}
+
+// 工作文件夹由系统目录选择器设置；路径只显示，不发送给聊天模型。
+async function chooseWorkspace() {
+  if (!desktopAvailable || loading.value) return
+  try {
+    const result = await window.agentDesktop.chooseWorkspace()
+    if (!result.canceled) {
+      workspaceFolder.value = result.folder
+      fileNotice.value = `工作文件夹已设置：${result.folder}`
+    }
+  } catch (cause) { error.value = `设置工作文件夹失败：${cause.message}` }
+}
+
+async function readWorkspaceFile() {
+  if (!desktopAvailable || loading.value) return false
+  if (!workspaceFolder.value) { error.value = '请先设置工作文件夹'; return false }
+  const draft = input.value
+  if (!conversationId.value && !(await newChat())) return false
+  input.value = draft
+  loading.value = true
+  error.value = ''
+  try {
+    const purpose = input.value.trim() || '阅读所选文件并回答后续问题'
+    const result = await window.agentDesktop.readWorkspaceFile(
+      conversationId.value, purpose, `${currentProvider.value} / ${currentModel.value}`)
+    if (!result.canceled) {
+      await refreshFiles()
+      if (result.kind === 'image') {
+        fileNotice.value = `已选中图片“${result.filename}”；请在文件框点击“识图”并单独确认。`
+        return false
+      }
+      pendingAttachmentIds.value.push(result.file_id)
+      fileNotice.value = `已读取工作文件夹中的“${result.filename}”；发送问题后模型才会使用。`
+      return true
+    }
+    return false
+  } catch (cause) { error.value = `读取工作文件失败：${cause.message}`; return false }
+  finally { loading.value = false }
+}
+
+async function copyExistingFile() {
+  if (!desktopAvailable) return
+  try {
+    const result = await window.agentDesktop.copyExistingFile()
+    if (!result.canceled) fileNotice.value = `已复制到你选择的位置：${result.filename}`
+  } catch (cause) { error.value = `复制文件失败：${cause.message}` }
+}
+
+// 对模型正文中的成果链接先检查是否真的存在，失败时留在聊天页。
+async function openMessageLink(event) {
+  const link = event.target.closest?.('a')
+  if (!link) return
+  let url
+  try { url = new URL(link.href, location.href) }
+  catch { event.preventDefault(); error.value = '链接地址无效'; return }
+  if (url.origin !== location.origin) {
+    if (!['https:', 'http:'].includes(url.protocol)) event.preventDefault()
+    return
+  }
+  event.preventDefault()
+  if (!/^\/chat\/files\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/.test(url.pathname)) {
+    error.value = '文件地址无效，生成可能未成功；请查看执行记录。'
+    return
+  }
+  try {
+    const response = await fetch(url.pathname)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const blobUrl = URL.createObjectURL(await response.blob())
+    const download = document.createElement('a')
+    download.href = blobUrl
+    download.download = response.headers.get('content-disposition')?.match(/filename="?([^";]+)/)?.[1] || '成果文件'
+    document.body.appendChild(download)
+    download.click()
+    download.remove()
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+  } catch (cause) { error.value = `文件尚未生成：${cause.message}` }
+}
+
+async function removeDisplayedFile(file) {
+  if (loading.value || !conversationId.value) return
+  if (!window.confirm(`从当前聊天删除“${file.filename}”？`)) return
+  loading.value = true
+  try {
+    const id = encodeURIComponent(conversationId.value)
+    const route = file.source === '资料库' ? 'knowledge' : 'attachments'
+    await requestJson(`/chat/history/${id}/${route}/${encodeURIComponent(file.id)}`,
+      { method: 'DELETE' })
+    pendingAttachmentIds.value = pendingAttachmentIds.value.filter(item => item !== file.id)
+    await refreshFiles()
+  } catch (cause) { error.value = cause.message }
+  finally { loading.value = false }
+}
+
+function selectAttachmentForNextTurn(file) {
+  if (loading.value || file.source !== '附件' || file.kind === 'image') return
+  const purpose = input.value.trim() || '阅读并分析文件内容'
+  if (!window.confirm(`允许模型在下一条消息中读取“${file.filename}”？\n用途：${purpose}`)) return
+  if (!pendingAttachmentIds.value.includes(file.id)) pendingAttachmentIds.value.push(file.id)
+  fileNotice.value = `已选择“${file.filename}”，发送下一条消息后模型才能读取。`
+}
+
 // Markdown 转换后再清理 HTML，避免直接插入不可信内容。
 function renderMarkdown(content) {
   return DOMPurify.sanitize(marked.parse(content || '', { async: false }))
@@ -126,7 +355,7 @@ function resumeFollowing() {
 }
 
 watch(
-  [messages, progress, loading, streamingText],
+  [messages, progress, loading, streamingText, streamingReasoning],
   () => {
     if (followLatest.value) scrollToLatest()
   },
@@ -239,10 +468,16 @@ watch(input, text => {
 function applyChat(chat) {
   conversationId.value = chat.id
   messages.value = chat.messages.map(message => ({ ...message }))
+  currentPersona.value = chat.persona || ''
+  currentAssistantName.value = chat.assistant_name || '助手'
+  pendingAttachmentIds.value = []
+  fileNotice.value = ''
+  refreshFiles(chat.id)
   // 先清理旧错误，再读取当前会话的草稿。
   error.value = ''
   input.value = readDraft(chat.id)
   streamingText.value = ''
+  streamingReasoning.value = ''
   followLatest.value = true
   menuChatId.value = null
   showKnowledgePanel.value = false
@@ -278,8 +513,9 @@ async function newChat(settings = {}) {
 }
 
 // 先创建会话取得编号，再把所选资料上传到该会话。
-async function createConfiguredChat({ title, persona, files }) {
-  const chat = await newChat({ title, persona })
+async function createConfiguredChat({ title, persona, assistant_name, files }) {
+  if (files.length && !window.confirm(`允许把所选的 ${files.length} 个文件加入新聊天资料库，供当前模型按需读取？`)) return
+  const chat = await newChat({ title, persona, assistant_name })
   if (!chat) return
   showNewChatSetup.value = false
   if (!files.length) return
@@ -322,20 +558,27 @@ async function openChat(chat) {
 }
 
 // PATCH 成功后再更新本地标题，避免页面改名但数据库没有改。
-async function renameChat(chat) {
-  if (loading.value) return
+function renameChat(chat) {
+  if (loading.value || !chat) return
   menuChatId.value = null
-  const title = window.prompt('输入新的聊天名称', chat.title)
-  if (title === null || !title.trim()) return
+  renameTarget.value = chat
+  renameDraft.value = chat.title
+}
+
+async function saveRename() {
+  const chat = renameTarget.value
+  const title = renameDraft.value.trim()
+  if (!chat || loading.value || !title) return
   loading.value = true
   error.value = ''
   try {
     const result = await requestJson(`/chat/history/${encodeURIComponent(chat.id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title.trim().slice(0, 60) }),
+      body: JSON.stringify({ title: title.slice(0, 60) }),
     })
     chat.title = result.title
+    renameTarget.value = null
   } catch (err) {
     error.value = err.message
   } finally {
@@ -360,6 +603,8 @@ async function deleteChat(chat) {
     if (conversationId.value === chat.id) {
       conversationId.value = null
       messages.value = []
+      selectedFiles.value = { attachments: [], knowledge: [] }
+      currentPersona.value = ''
       input.value = ''
       streamingText.value = ''
       rememberSelectedChat()
@@ -410,14 +655,22 @@ async function stopGeneration() {
 
 // 发送仍走流式接口；消息入库由后端负责，前端不要重复保存。
 async function send() {
-  const text = input.value.trim()
+  const text = input.value.trim() || (pendingAttachmentIds.value.length
+    ? '请阅读我选中的文件并总结重点。' : '')
   if (!text || loading.value) return
+  // 明确要求读取工作文件夹时，先选择并批准具体文件，再把编号交给模型。
+  if (desktopAvailable && workspaceFolder.value && !pendingAttachmentIds.value.length
+      && /(?:读取|打开|查看|分析).{0,60}工作文件夹|工作文件夹.{0,60}(?:读取|打开|查看|分析)/.test(text)) {
+    if (!(await readWorkspaceFile())) return
+  }
   if (!conversationId.value && !(await newChat())) return
   // 新问题开始时清除上一轮的临时进度。
   liveToolSteps.value = []
   streamingText.value = ''
+  streamingReasoning.value = ''
   followLatest.value = true
-  messages.value.push({ role: 'user', content: text })
+  const userMessage = { role: 'user', content: text }
+  messages.value.push(userMessage)
   input.value = ''
   loading.value = true
   progress.value = '正在连接 Agent…'
@@ -434,7 +687,9 @@ async function send() {
         // 只提交本次问题；过去的对话由后端从数据库读取。
       messages: [{ role: 'user', content: text }],
         web_search: searchAvailable.value && webSearchEnabled.value,
+        thinking: currentProvider.value === 'deepseek' && thinkingEnabled.value,
         conversation_id: conversationId.value,
+        attachment_ids: pendingAttachmentIds.value,
       }),
     })
     if (!response.ok) {
@@ -442,12 +697,19 @@ async function send() {
     }
 
     let completed = false
+    let finishedData = null
     const toolNames = {
       read_attachment: '读取附件',
       save_report: '生成报告',
       search_web: '联网搜索',
       lookup_inventory: '查询资料库库存',
       search_knowledge: '检索资料库',
+      save_presentation: '制作 PPT',
+      generate_image: 'AI 生图',
+      save_document: '制作 Word',
+      save_spreadsheet: '制作 Excel',
+      save_pdf: '制作 PDF',
+      save_text_file: '保存文件',
     }
 
 
@@ -465,6 +727,7 @@ async function send() {
           role: 'assistant', content: '对话内容被主动停止',
         })
         streamingText.value = ''
+        streamingReasoning.value = ''
         completed = true // 主动停止也是正常结束，不能当作连接异常。
         return
       }
@@ -473,6 +736,10 @@ async function send() {
       if (event.type === 'round_start') {
         streamingText.value = ''
         progress.value = '正在生成…'
+      }
+      if (event.type === 'reasoning_delta') {
+        streamingReasoning.value += event.text
+        progress.value = '正在思考…'
       }
       if (event.type === 'text_delta') {
         streamingText.value += event.text
@@ -499,20 +766,39 @@ async function send() {
       if (event.type === 'error') throw new Error(event.message)
       if (event.type === 'done') {
         const data = event.data
+        finishedData = data
         conversationId.value = data.conversation_id
         messages.value.push({
           role: 'assistant',
           content: data.reply,
           tool_steps: data.tool_steps || [],
+          reasoning: data.reasoning || streamingReasoning.value,
+          provider: data.provider, model: data.model,
         })
         streamingText.value = ''
+        streamingReasoning.value = ''
+        if (!(data.tool_steps || []).some(step => step.result?.error)) pendingAttachmentIds.value = []
         rememberSelectedChat()
         completed = true
       }
     })
     if (!completed) throw new Error('连接提前结束，未收到最终结果')
+    // 聊天完成后逐份请求用户确认，再把成果写进固定工作文件夹。
+    if (desktopAvailable && workspaceFolder.value && finishedData) {
+      for (const step of finishedData.tool_steps || []) {
+        const url = step.result?.download_url || step.result?.image_url
+        if (!url) continue
+        const filename = step.result?.filename || '成果文件.md'
+        try {
+          const saved = await window.agentDesktop.saveToWorkspace(
+            url, filename, `根据本轮问题生成：${text.slice(0, 120)}`)
+          if (!saved.canceled) fileNotice.value = `成果已保存：${saved.path}`
+        } catch (cause) { error.value = `保存工作文件失败：${cause.message}` }
+      }
+    }
   } catch (err) {
     error.value = err.message
+    userMessage.failed = true
   } finally {
     // 成功、失败或取消，都在事件流处理结束后统一收尾。
     activeTaskId.value = null
@@ -521,6 +807,7 @@ async function send() {
 
     try {
       await loadHistory()
+      await refreshFiles()
     } catch (err) {
       const warning = `历史列表刷新失败：${err.message}`
       error.value = error.value ? `${error.value}；${warning}` : warning
@@ -533,8 +820,13 @@ async function send() {
 
 // 上传前等待后端建立会话，防止附件写到空编号或错误会话下。
 async function uploadAttachment(event) {
-  const file = event.target.files?.[0]
-  if (!file || loading.value) return
+  const files = Array.from(event.target.files || [])
+  if (!files.length || loading.value) return
+  // 系统文件读取前明确征得用户同意，取消时不上传也不交给模型。
+  if (!window.confirm(`允许读取并上传 ${files.map(file => file.name).join('、')} 到当前聊天？模型只会在你发送问题后按需读取。`)) {
+    event.target.value = ''
+    return
+  }
   const draft = input.value
   if (!conversationId.value) {
     const created = await newChat()
@@ -548,21 +840,30 @@ async function uploadAttachment(event) {
   const chatId = conversationId.value
   loading.value = true
   error.value = ''
+  const uploaded = []
+  const failed = []
   try {
-    const formData = new FormData()
-    formData.append('file', file)
-    const response = await fetch(`/chat/upload/${encodeURIComponent(chatId)}`, {
-      method: 'POST',
-      body: formData,
-    })
-    if (!response.ok) throw new Error(`上传失败：${await response.text()}`)
-    const data = await response.json()
-    const attachment = `附件：${data.filename}\n附件编号：${data.file_id}`
-    input.value = input.value.trim()
-      ? `${input.value}\n\n${attachment}`
-      : `请读取以下附件并总结重点。\n${attachment}`
-  } catch (err) {
-    error.value = err.message
+    for (const file of files) {
+      try {
+        const formData = new FormData()
+        formData.append('file', file)
+        const response = await fetch(`/chat/upload/${encodeURIComponent(chatId)}`, {
+          method: 'POST', body: formData,
+        })
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}))
+          throw new Error(detail.detail || `HTTP ${response.status}`)
+        }
+        uploaded.push(await response.json())
+      } catch (cause) { failed.push(`${file.name}：${cause.message}`) }
+    }
+    await refreshFiles(chatId)
+    const documents = uploaded.filter(file => file.kind !== 'image')
+    pendingAttachmentIds.value.push(...documents.map(file => file.file_id))
+    if (documents.length) fileNotice.value = `已选择 ${documents.length} 个文件；文件显示在上方文件框，发送后模型才会读取。`
+    const images = uploaded.filter(file => file.kind === 'image')
+    if (images.length) fileNotice.value = `已上传 ${images.length} 张图片；在文件框点击“识图”才会发送给智谱。`
+    if (failed.length) error.value = `部分文件上传失败：${failed.join('；')}`
   } finally {
     loading.value = false
     event.target.value = ''
@@ -595,6 +896,10 @@ onMounted(async () => {
     progress.value = ''
     loading.value = false
   }
+  if (desktopAvailable) {
+    try { workspaceFolder.value = (await window.agentDesktop.getWorkspace()).folder || '' }
+    catch (cause) { error.value = `读取工作文件夹设置失败：${cause.message}` }
+  }
 })
 
 // 页面卸载时取消定时器，避免遗留任务。
@@ -606,9 +911,10 @@ onUnmounted(() => clearTimeout(copyTimer))
 <template>
   <div class="workspace" :class="{ collapsed: !sidebarOpen }">
     <!-- // collapsed 是否折叠 -->
+    <Transition name="sidebar-slide">
     <aside v-if="sidebarOpen" class="sidebar">
       <header class="sidebar-header">
-        <strong>Agent 工作台</strong>
+        <strong>Agent 工作台 <small>v0.1.2</small></strong>
         <button class="icon-button" @click="sidebarOpen = false"
           title="收起侧栏" aria-label="收起侧栏">‹</button>
       </header>
@@ -656,6 +962,7 @@ onUnmounted(() => clearTimeout(copyTimer))
         </div>
       </nav>
     </aside>
+    </Transition>
 
     <main class="chat-area">
       <header class="chat-header">
@@ -665,6 +972,19 @@ onUnmounted(() => clearTimeout(copyTimer))
         <span class="current-chat-title" :title="currentChatTitle">
           {{ currentChatTitle }}
         </span>
+        <button type="button" class="assistant-edit" :disabled="loading || !conversationId"
+          @click="renameChat(savedChats.find(chat => chat.id === conversationId))"
+          title="重命名当前聊天">重命名</button>
+        <button type="button" class="assistant-edit" :disabled="loading || !conversationId"
+          @click="openPersonaEditor" aria-label="助手设定"
+          title="调整当前聊天的助手设定">{{ currentAssistantName }}设定</button>
+        <button v-if="desktopAvailable" type="button" class="assistant-edit copy-file-button"
+          :disabled="loading" @click="copyExistingFile"
+          aria-label="复制文件"
+          title="先选择本机文件，再选择保存位置">复制文件</button>
+        <button v-if="desktopAvailable" type="button" class="assistant-edit workspace-button"
+          :disabled="loading" @click="chooseWorkspace" title="设置固定工作文件夹"
+          aria-label="设置工作文件夹">工作文件夹</button>
         <ApiSettings :busy="loading" @updated="applyApiSettings" />
         <button type="button" class="icon-button" title="资料库" aria-label="资料库"
           :disabled="loading || !conversationId" @click="showKnowledgePanel = true">
@@ -677,7 +997,8 @@ onUnmounted(() => clearTimeout(copyTimer))
           @create="createConfiguredChat"
         />
         <KnowledgePanel v-if="showKnowledgePanel && conversationId"
-          :conversation-id="conversationId" @close="showKnowledgePanel = false" />
+          :conversation-id="conversationId" @close="showKnowledgePanel = false"
+          @changed="refreshFiles" />
         <!-- 生成期间禁止导出，避免下载到尚未写完的记录。 -->
         <button type="button" class="icon-button export-chat"
           :disabled="loading || exporting || !conversationId || !messages.length"
@@ -685,6 +1006,61 @@ onUnmounted(() => clearTimeout(copyTimer))
           <Download :size="18" />
         </button>
       </header>
+      <!-- 自定义重命名框不依赖浏览器 prompt，桌面版也能稳定输入。 -->
+      <Teleport to="body">
+        <div v-if="renameTarget" class="persona-backdrop">
+          <section class="persona-panel" role="dialog" aria-modal="true" aria-label="重命名聊天">
+            <h2>重命名聊天</h2>
+            <form @submit.prevent="saveRename">
+              <input v-model="renameDraft" maxlength="60" autofocus aria-label="新的聊天名称" />
+              <div><button type="button" @click="renameTarget = null">取消</button>
+                <button type="submit" :disabled="loading || !renameDraft.trim()">保存</button></div>
+            </form>
+          </section>
+        </div>
+      </Teleport>
+      <!-- 模型和文件分开展示；历史模型是实际使用记录。 -->
+      <div class="context-strip">
+        <section class="context-card" aria-label="使用模型">
+          <strong>✦ 模型</strong>
+          <span>下一轮：{{ currentProvider }} · {{ currentModel }}</span>
+          <small v-if="modelUsages.length">已使用：{{ modelUsages.join('、') }}</small>
+        </section>
+        <section class="context-card files-card" aria-label="本聊天文件">
+          <strong>▣ 本聊天文件</strong>
+          <small v-if="desktopAvailable">工作文件夹：{{ workspaceFolder || '未设置' }}</small>
+          <button v-if="desktopAvailable" type="button" :disabled="loading || !workspaceFolder"
+            @click="readWorkspaceFile">读取工作文件</button>
+          <small>你选中的文件可供当前聊天模型读取；图片识图需单独确认。</small>
+          <span v-if="!allFiles.length">暂无文件</span>
+          <ul v-else>
+            <li v-for="file in allFiles" :key="file.id">
+              <span :title="file.filename">{{ file.filename }}</span>
+              <small>{{ file.source }}{{ readFileIds.has(file.id) ? ' · 已读取' : '' }}{{ pendingAttachmentIds.includes(file.id) ? ' · 下轮可读取' : '' }}</small>
+              <button v-if="file.source === '附件' && file.kind !== 'image'" type="button"
+                :disabled="loading" @click="selectAttachmentForNextTurn(file)">下轮读取</button>
+              <button v-if="file.kind === 'image'" type="button" :disabled="loading || !imageAvailable"
+                :title="imageAvailable ? '将这张图片发送给智谱视觉 API' : '先在 API 设置中配置智谱密钥'"
+                @click="inspectImage(file)">识图</button>
+              <button type="button" :disabled="loading" @click="removeDisplayedFile(file)">删除</button>
+            </li>
+          </ul>
+        </section>
+      </div>
+      <p v-if="fileNotice" class="file-notice" role="status">{{ fileNotice }}</p>
+      <Teleport to="body">
+      <div v-if="showPersonaEditor" class="persona-backdrop">
+        <section class="persona-panel" role="dialog" aria-modal="true" aria-label="助手设定">
+          <h2>当前聊天的助手</h2>
+          <p>写下角色、语气或专业方向；保存后从下一条消息开始生效。</p>
+          <label>助手名字<input v-model="assistantNameDraft" maxlength="30" aria-label="助手名字" /></label>
+          <textarea v-model="personaDraft" maxlength="2000" aria-label="助手角色设定"
+            placeholder="例如：你是一位耐心的 Vue 入门老师，每步都解释原因。"></textarea>
+          <div><button type="button" :disabled="loading" @click="showPersonaEditor = false">取消</button>
+            <button type="button" :disabled="loading || !assistantNameDraft.trim()" @click="savePersona">保存</button></div>
+        </section>
+      </div>
+      </Teleport>
       <!-- 获取消息容器，并监听用户是否主动向上浏览。 -->
       <section
         ref="messageList"
@@ -695,7 +1071,8 @@ onUnmounted(() => clearTimeout(copyTimer))
         <article v-for="(message, index) in messages" :key="index">
           <!-- 助手回答显示复制按钮，用户消息保持原样。 -->
           <div class="message-header">
-            <strong>{{ message.role === 'user' ? '你' : '助手' }}</strong>
+            <strong>{{ message.role === 'user' ? '你' : currentAssistantName }}</strong>
+            <small v-if="message.failed" class="message-failed">本轮失败，不会加入后续对话</small>
             <button v-if="message.role === 'assistant'"
               type="button" class="copy-button"
               :title="copiedMessage === message ? '已复制' : '复制回答'"
@@ -704,8 +1081,12 @@ onUnmounted(() => clearTimeout(copyTimer))
               <component :is="copiedMessage === message ? Check : Copy" :size="16" />
             </button>
           </div>
+          <details v-if="message.reasoning" class="reasoning-panel" open>
+            <summary>思考过程 · 点击收起或展开</summary>
+            <div class="reasoning-text">{{ message.reasoning }}</div>
+          </details>
           <!-- 展示 Markdown 正文；原始消息仍用于接口请求和记录保存。 -->
-          <div class="markdown-body" v-html="renderMarkdown(message.content)"></div>
+          <div class="markdown-body" v-html="renderMarkdown(message.content)" @click="openMessageLink"></div>
           <!-- 标题使用普通文本插值，外部链接在新标签页打开。 -->
           <section v-if="searchSources(message).length"
             class="search-sources" aria-label="搜索来源">
@@ -732,22 +1113,38 @@ onUnmounted(() => clearTimeout(copyTimer))
               <pre>{{ JSON.stringify(step.result, null, 2) }}</pre>
               <!-- 直接使用报告工具返回的地址，不依赖助手正文中的链接。 -->
               <a
-                v-if="step.name === 'save_report' && step.result?.download_url"
+                v-if="step.result?.download_url"
                 class="report-download"
-                :href="step.result.download_url"
+                :href="step.result.download_url" @click="openMessageLink"
               >
-                下载 Markdown 报告
+                下载 {{ step.result.filename || (step.name === 'save_presentation' ? 'PPTX' : '成果文件') }}
               </a>
+              <a v-if="step.result?.image_url" class="report-download"
+                :href="step.result.image_url" @click="openMessageLink">查看生成图片</a>
+              <button v-if="desktopAvailable && (step.result?.download_url || step.result?.image_url)"
+                type="button" class="report-download save-local"
+                @click="saveArtifactToFolder(step)">另存到…</button>
             </section>
           </details>
         </article>
         <!-- 临时回答单独展示，避免未完成的内容混入下一次模型上下文。 -->
         <article v-if="streamingText" class="streaming-message">
-          <strong>{{ loading ? '助手 · 生成中' : '助手 · 未完成' }}</strong>
+          <strong>{{ currentAssistantName }} · {{ loading ? '生成中' : '未完成' }}</strong>
+          <details v-if="streamingReasoning" class="reasoning-panel" open>
+            <summary>思考过程 · 点击收起或展开</summary>
+            <div class="reasoning-text">{{ streamingReasoning }}</div>
+          </details>
           <div
             class="markdown-body"
             v-html="renderMarkdown(streamingText)"
+            @click="openMessageLink"
           ></div>
+        </article>
+        <article v-else-if="streamingReasoning && loading" class="streaming-message">
+          <details class="reasoning-panel" open>
+            <summary>正在思考 · 点击收起或展开</summary>
+            <div class="reasoning-text">{{ streamingReasoning }}</div>
+          </details>
         </article>
         <!-- 仅在当前任务执行期间展示，结束后使用原有执行记录。 -->
         <ol v-if="loading && activeTaskId && liveToolSteps.length"
@@ -773,6 +1170,14 @@ onUnmounted(() => clearTimeout(copyTimer))
       </div>
 
       <!-- 统一表单：点击发送或按 Enter 都复用 send。 -->
+      <div class="composer-options">
+        <label class="thinking-switch" :class="{ disabled: currentProvider !== 'deepseek' }">
+          <input type="checkbox" v-model="thinkingEnabled"
+            :disabled="loading || currentProvider !== 'deepseek'" />
+          深度思考
+        </label>
+        <small v-if="currentProvider !== 'deepseek'">思考过程目前支持 DeepSeek</small>
+      </div>
       <form class="bottom-composer" @submit.prevent="send">
         <!-- 左侧两行工具，总高度与输入框一致。 -->
         <div class="composer-tools">
@@ -792,8 +1197,8 @@ onUnmounted(() => clearTimeout(copyTimer))
             <span>上传资料</span>
             <input
               class="upload-picker"
-              type="file"
-              accept=".txt,.md,.pdf,.docx,.png,.jpg,.jpeg"
+              type="file" multiple
+              accept=".txt,.md,.csv,.json,.py,.js,.ts,.vue,.html,.css,.xml,.yaml,.yml,.sql,.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg"
               :disabled="loading"
               aria-label="上传资料"
               @change="uploadAttachment"
@@ -816,7 +1221,7 @@ onUnmounted(() => clearTimeout(copyTimer))
           {{ stopping ? '停止中…' : '停止' }}
         </button>
         <button v-else class="composer-action" type="submit"
-          :disabled="loading || !input.trim()">
+          :disabled="loading || (!input.trim() && !pendingAttachmentIds.length)">
           发送
         </button>
       </form>

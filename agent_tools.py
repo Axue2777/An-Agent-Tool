@@ -8,6 +8,9 @@ from model_stream import request_stream_message
 from search_tools import SEARCH_TOOL, search_web
 from knowledge_tools import LOOKUP_INVENTORY_TOOL, SEARCH_KNOWLEDGE_TOOL
 from knowledge_store import lookup_inventory, search_chunks
+from creative_tools import IMAGE_TOOL, PRESENTATION_TOOL, generate_image, save_presentation
+from output_tools import (DOCUMENT_TOOL, SPREADSHEET_TOOL, PDF_TOOL, TEXT_FILE_TOOL,
+                          save_document, save_spreadsheet, save_pdf, save_text_file)
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -15,10 +18,12 @@ from zoneinfo import ZoneInfo
 MAX_TOOL_CALLS = 8
 # 工具只查询当前聊天的资料库，不包含旧版固定库存表。
 TOOLS = [REPORT_TOOL, READ_ATTACHMENT_TOOL, SEARCH_TOOL,
-         LOOKUP_INVENTORY_TOOL, SEARCH_KNOWLEDGE_TOOL]
+         LOOKUP_INVENTORY_TOOL, SEARCH_KNOWLEDGE_TOOL,
+         PRESENTATION_TOOL, IMAGE_TOOL, DOCUMENT_TOOL, SPREADSHEET_TOOL,
+         PDF_TOOL, TEXT_FILE_TOOL]
 
 # 根据工具名称分发执行，并检查模型提供的参数。
-def execute_tool(call, conversation_id, search_api_key=None):
+def execute_tool(call, conversation_id, search_api_key=None, image_api_key=None):
     try:
         args = json.loads(call.function.arguments)
         if not isinstance(args, dict):
@@ -53,22 +58,53 @@ def execute_tool(call, conversation_id, search_api_key=None):
             if set(args) != {"content"}:
                 raise ValueError("报告参数必须只有 content")
             return save_report(args["content"], conversation_id)
+        if call.function.name == "save_presentation":
+            if set(args) != {"title", "slides"}:
+                raise ValueError("PPT 需要 title 和 slides")
+            return save_presentation(args["title"], args["slides"], conversation_id)
+        if call.function.name == "generate_image":
+            if set(args) != {"prompt"}:
+                raise ValueError("生图需要 prompt")
+            return generate_image(args["prompt"], conversation_id, image_api_key)
+        if call.function.name == "save_document":
+            if set(args) != {"title", "sections"}:
+                raise ValueError("Word 文档需要 title 和 sections")
+            return save_document(args["title"], args["sections"], conversation_id)
+        if call.function.name == "save_spreadsheet":
+            if set(args) != {"sheets"}:
+                raise ValueError("Excel 表格需要 sheets")
+            return save_spreadsheet(args["sheets"], conversation_id)
+        if call.function.name == "save_pdf":
+            if set(args) != {"title", "sections"}:
+                raise ValueError("PDF 需要 title 和 sections")
+            return save_pdf(args["title"], args["sections"], conversation_id)
+        if call.function.name == "save_text_file":
+            if set(args) != {"filename", "content"}:
+                raise ValueError("文本文件需要 filename 和 content")
+            return save_text_file(args["filename"], args["content"], conversation_id)
 
         raise ValueError("不支持的工具")
     except (ValueError, TypeError) as error:
         # 将参数错误交回模型，供它说明失败原因。
         return {"error": str(error)}
+    except Exception as error:
+        # 文件或第三方服务异常不能让整轮对话崩掉，也不把敏感细节发给模型。
+        print(f"工具 {call.function.name} 执行失败：{type(error).__name__}")
+        return {"error": f"{call.function.name} 未完成，请检查服务或文件参数后重试"}
 
 
 # 连续处理工具请求，支持读取附件、搜索和生成报告。
 # on_event 用于向外报告进度；普通聊天接口可以不传。
 def run_agent(client, history, conversation_id, on_event=None, web_search=True,
-              model="deepseek-flash", search_api_key=None, persona=""):
+              model="deepseek-flash", search_api_key=None, persona="",
+              provider="deepseek", thinking=False, image_api_key=None,
+              attachment_refs=None, assistant_name="助手"):
     tool_steps = []
     # 为本次请求筛选工具，不修改全局 TOOLS，避免影响其他请求。
     available_tools = [
         tool for tool in TOOLS
-        if web_search or tool["function"]["name"] != "search_web"
+        if (web_search or tool["function"]["name"] != "search_web")
+        and (image_api_key or tool["function"]["name"] != "generate_image")
     ]
     messages = [{
         "role": "system",
@@ -94,8 +130,16 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True,
             "摘要不等于网页全文，不得声称已完整阅读全部网页。"
             "搜索无结果、失败或来源不足时明确说明，不要假装已经核实。"
             "根据搜索结果生成报告时，也将实际参考链接写进报告正文。"
+            "需要可编辑的 PPT 时调用 save_presentation，成功后提供下载链接。"
+            "需要 Word、Excel、PDF、代码或数据文件时分别调用 save_document、"
+            "save_spreadsheet、save_pdf、save_text_file，成功后使用实际 download_url。"
+            "这些工具只写入当前聊天的成果区；用户在界面选择目标目录后再另存到系统。"
+            "需要生成图片且工具可用时调用 generate_image，成功后用 Markdown 图片展示 image_url。"
+            "识别上传图片由用户在界面明确点击识图后执行，不要声称已自动看过原图。"
         ),
     }, *history]
+    if assistant_name != "助手":
+        messages[0]["content"] += f"\n本聊天中你的称呼是“{assistant_name}”。"
 
     # 角色只控制本会话的回答风格，不能修改工具权限或系统规则。
     messages[0]["content"] += (
@@ -106,6 +150,18 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True,
     )
     if persona:
         messages[0]["content"] += "\n用户设定的角色与风格：\n" + persona
+        # 扮演角色时像日常对话一样简短接话，明确要求详细说明时再展开。
+        messages[0]["content"] += (
+            "\n角色聊天默认一句到两句自然回应，不反复复述用户的话；"
+            "除非用户要求，否则不要写舞台动作、长篇独白或连续提问。"
+        )
+    if attachment_refs:
+        names = "；".join(f"{item['filename']}（附件编号：{item['id']}）"
+                         for item in attachment_refs)
+        messages[0]["content"] += (
+            "\n用户已明确选择并同意本轮读取这些本聊天附件：" + names +
+            "。如需回答文件内容，先调用 read_attachment，不要假装已读取。"
+        )
 
     # 提醒模型如实说明未完成的部分，不能编造工具结果。
     messages[0]["content"] += (
@@ -115,10 +171,11 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True,
     )
 
     # 最多请求模型 12 轮；达到工具上限时提前进入总结。
+    force_summary = False
     for step in range(12):
         tool_choice = (
             "none"
-            if step == 11 or len(tool_steps) >= MAX_TOOL_CALLS
+            if step == 11 or len(tool_steps) >= MAX_TOOL_CALLS or force_summary
             else "auto"
         )
         message = request_stream_message(
@@ -128,6 +185,8 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True,
             tool_choice,
             on_event=on_event,
             model=model,
+            provider=provider,
+            thinking=thinking,
         )
 
         # 没有工具请求时，说明模型已生成最终回答。
@@ -162,7 +221,8 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True,
             else:
                 # 仅计量工具执行，不包含模型生成和记录保存的时间。
                 started_at = perf_counter()
-                result = execute_tool(call, conversation_id, search_api_key=search_api_key)
+                result = execute_tool(call, conversation_id, search_api_key=search_api_key,
+                                      image_api_key=image_api_key)
                 duration_ms = round((perf_counter() - started_at) * 1000, 2)
 
             # 执行后发送事件，将实际结果交给网页。
@@ -175,6 +235,9 @@ def run_agent(client, history, conversation_id, on_event=None, web_search=True,
                 })
 
             result_text = json.dumps(result, ensure_ascii=False)
+            if isinstance(result, dict) and result.get("error"):
+                # 工具失败后让模型如实说明，避免它连续重试并编造下载地址。
+                force_summary = True
 
             # 收集完整执行记录，用于最终返回和历史保存。
             tool_steps.append({

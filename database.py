@@ -48,6 +48,14 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_messages_conversation
             ON messages(conversation_id, id);
+            CREATE TABLE IF NOT EXISTS attachments (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS knowledge_files (
                 id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
@@ -83,6 +91,14 @@ def init_db():
             db.execute(
                 "ALTER TABLE conversations ADD COLUMN title_locked INTEGER NOT NULL DEFAULT 0"
             )
+        if "assistant_name" not in columns:
+            db.execute("ALTER TABLE conversations ADD COLUMN assistant_name TEXT NOT NULL DEFAULT '助手'")
+        message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+        for column in ("reasoning", "provider", "model"):
+            if column not in message_columns:
+                db.execute(f"ALTER TABLE messages ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        if "failed" not in message_columns:
+            db.execute("ALTER TABLE messages ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
 
 
 # 收到问题就保存：创建或更新会话，并追加最新用户消息。
@@ -108,22 +124,30 @@ def save_user_message(conversation_id, content):
                 updated_at = excluded.updated_at
         """, (chat_id, title, timestamp, timestamp))
         # 在同一事务中完成命名和消息保存；后续消息不再触发自动命名。
-        db.execute("""
+        cursor = db.execute("""
             INSERT INTO messages(conversation_id, role, content, created_at)
             VALUES (?, 'user', ?, ?)
         """, (chat_id, content, timestamp))
+        return cursor.lastrowid
+
+
+def mark_user_message_failed(message_id):
+    # 保留页面和 Markdown 中的失败提问，但以后请求模型时不带这条消息。
+    with connect_db() as db:
+        db.execute("UPDATE messages SET failed = 1 WHERE id = ? AND role = 'user'", (message_id,))
 
 
 # 一轮成功后保存完整回答及工具结果，不逐片段反复写库。
-def save_assistant_message(conversation_id, content, tool_steps):
+def save_assistant_message(conversation_id, content, tool_steps, *, reasoning="", provider="", model="", failed=False):
     chat_id = str(conversation_id)
     timestamp = now()
     with connect_db() as db:
         db.execute("""
             INSERT INTO messages(
-                conversation_id, role, content, tool_steps_json, created_at
-            ) VALUES (?, 'assistant', ?, ?, ?)
-        """, (chat_id, content, json.dumps(tool_steps, ensure_ascii=False), timestamp))
+                conversation_id, role, content, tool_steps_json, reasoning, provider, model, failed, created_at
+            ) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)
+        """, (chat_id, content, json.dumps(tool_steps, ensure_ascii=False), reasoning,
+              provider, model, int(failed), timestamp))
         db.execute(
             "UPDATE conversations SET updated_at = ? WHERE id = ?",
             (timestamp, chat_id),
@@ -149,7 +173,7 @@ def get_conversation(conversation_id):
         if chat is None:
             return None
         rows = db.execute("""
-            SELECT id, role, content, tool_steps_json, created_at
+            SELECT id, role, content, tool_steps_json, reasoning, provider, model, failed, created_at
             FROM messages WHERE conversation_id = ? ORDER BY id
         """, (str(conversation_id),)).fetchall()
     result = dict(chat)
@@ -159,6 +183,38 @@ def get_conversation(conversation_id):
         message["tool_steps"] = json.loads(message.pop("tool_steps_json"))
         result["messages"].append(message)
     return result
+
+
+# 每个会话的助手性格可随时调整，后续轮次读取最新设定。
+def update_persona(conversation_id, persona, assistant_name="助手"):
+    with connect_db() as db:
+        cursor = db.execute("UPDATE conversations SET persona = ?, assistant_name = ?, updated_at = ? WHERE id = ?",
+                            (persona, assistant_name, now(), str(conversation_id)))
+        return cursor.rowcount > 0
+
+
+# 上传目录保存正文或原图，数据库只记录可显示的文件名和类型。
+def save_attachment(conversation_id, file_id, filename, kind):
+    with connect_db() as db:
+        db.execute("INSERT INTO attachments(id, conversation_id, filename, kind, created_at) "
+                   "VALUES (?, ?, ?, ?, ?)",
+                   (str(file_id), str(conversation_id), filename, kind, now()))
+
+
+def list_attachments(conversation_id):
+    with connect_db() as db:
+        rows = db.execute("SELECT id, filename, kind, created_at FROM attachments "
+                          "WHERE conversation_id = ? ORDER BY created_at, id",
+                          (str(conversation_id),)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_attachment(conversation_id, file_id):
+    # 两个编号同时匹配，避免删除其他聊天的附件记录。
+    with connect_db() as db:
+        cursor = db.execute("DELETE FROM attachments WHERE conversation_id = ? AND id = ?",
+                            (str(conversation_id), str(file_id)))
+        return cursor.rowcount > 0
 
 # 关键知识点：
 
@@ -171,7 +227,7 @@ def get_conversation(conversation_id):
 # - 工具步骤使用 JSON 保留原始结构，恢复后仍能用于执行记录和下载链接。
 
 # 创建空会话，让“新建聊天”无需等到发送消息才保存。
-def create_conversation(conversation_id, title=None, persona=""):
+def create_conversation(conversation_id, title=None, persona="", assistant_name="助手"):
     timestamp = now()
     custom_title = title.strip() if title else ""
     display_title = custom_title or "新建聊天"
@@ -180,11 +236,11 @@ def create_conversation(conversation_id, title=None, persona=""):
     with connect_db() as db:
         db.execute("""
             INSERT INTO conversations(
-                id, title, persona, title_locked, created_at, updated_at
+                id, title, persona, assistant_name, title_locked, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            str(conversation_id), display_title, persona.strip(),
+            str(conversation_id), display_title, persona.strip(), assistant_name,
             title_locked, timestamp, timestamp,
         ))
     return get_conversation(conversation_id)
@@ -214,18 +270,23 @@ def delete_conversation(conversation_id):
         return cursor.rowcount > 0
 
 # 只读取最近 21 条消息，不删除数据库中的完整历史。
-def get_recent_messages(conversation_id):
+def get_recent_messages(conversation_id, include_reasoning=False):
     with connect_db() as db:
         rows = db.execute("""
-            SELECT role, content
+            SELECT role, content, reasoning
             FROM messages
-            WHERE conversation_id = ?
+            WHERE conversation_id = ? AND failed = 0
             ORDER BY id DESC
             LIMIT 21
         """, (str(conversation_id),)).fetchall()
 
     # 查询时最新在前，交给模型前恢复为正常聊天顺序。
-    history = [dict(row) for row in reversed(rows)]
+    history = []
+    for row in reversed(rows):
+        item = {"role": row["role"], "content": row["content"]}
+        if include_reasoning and row["role"] == "assistant" and row["reasoning"]:
+            item["reasoning_content"] = row["reasoning"]
+        history.append(item)
 
     # 截取后如果从助手回答开始，移除这条缺少问题的回答。
     while history and history[0]["role"] == "assistant":

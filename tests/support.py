@@ -13,6 +13,8 @@ import chat_records
 import database
 import file_tools
 import report_tools
+import creative_tools
+import output_tools
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +30,7 @@ class SandboxCase(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(database, "DB_PATH", self.root / "agent.db"))
-        for module in (chat_records, file_tools, report_tools):
+        for module in (chat_records, file_tools, report_tools, creative_tools, output_tools):
             self.stack.enter_context(patch.object(module, "RECORDS", self.records))
         # 真实 HTTPTransport 被禁用；MockTransport 和 TestClient 不受影响。
         self.stack.enter_context(patch(
